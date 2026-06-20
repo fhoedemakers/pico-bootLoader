@@ -173,15 +173,20 @@ void logAppPartitionState(const char *when)
         when, (unsigned)sp, (unsigned)reset, (int)present);
 }
 
-// uf2_loader progress callback: phase = "Erasing"/"Writing", done/total
-// are block counts. We throttle "Writing" to once per ~64 blocks so the UART
-// doesn't become the bottleneck during the flash loop.
+// uf2_loader progress callback: UART-only. The HSTX display is driven by
+// core1 in this framework, and we reset core1 just before flashing -- so the
+// on-screen picture goes blank for the duration of the flash regardless of
+// what we paint into the framebuffer. UART output is throttled to once per
+// 64 blocks plus the boundary events (start/end), so it does not bottleneck
+// the flash loop.
 void flashProgress(const char *phase, uint32_t done, uint32_t total)
 {
-    if (strcmp(phase, "Writing") == 0) {
-        if (done != total && (done & 0x3F) != 0) return;
+    bool isWriting = (strcmp(phase, "Writing") == 0);
+    bool boundary  = (done == 0 || done == total);
+    if (boundary || !isWriting || (done & 0x3F) == 0) {
+        unsigned pct = (total > 0) ? (unsigned)(((uint64_t)done * 100) / total) : 0;
+        LOG("  %s %u / %u  (%u%%)", phase, (unsigned)done, (unsigned)total, pct);
     }
-    LOG("  %s %u / %u", phase, (unsigned)done, (unsigned)total);
 }
 
 } // namespace
@@ -325,11 +330,18 @@ int main()
                 continue;
             }
 
-            // Commit: show a notice, quiesce the display core, flash, then jump.
+            // Commit: paint the "Flashing..." notice WHILE core1 is still
+            // alive (we need a few frames of it on screen before resetting
+            // core1 kills HSTX servicing), then quiesce core1 and flash.
+            // The screen will go blank for the ~1-2 seconds of the actual
+            // flash op -- progress is reported on UART instead. Live on-screen
+            // progress would need the framework's core1 to register a
+            // multicore_lockout_victim so we can park-and-resume it per flash
+            // op instead of resetting it; that's a pico_shared change.
             LOG("Pre-flight OK. Committing to flash; resetting core1 and erasing/programming.");
             showMessage("Flashing...", g_labels[sel], "Do not power off.");
             DrawScreen(-1);
-            sleep_ms(500);
+            sleep_ms(500);   // let core1 push the notice out a few frames
 
             multicore_reset_core1();   // stop HSTX servicing before erasing flash
             LOG("core1 reset; beginning flash sequence");
