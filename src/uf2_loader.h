@@ -30,20 +30,23 @@ typedef struct {
 typedef void (*uf2_progress_cb)(const char *phase, uint32_t done, uint32_t total);
 
 /*
- * Program the named file (must already be openable via storage_open) into the
- * application partition. Erases only the sectors the image actually touches.
+ * Program the named file into the region [base, base + size). Erases only the
+ * sectors the image actually touches. The two convenience wrappers below
+ * default to the legacy single application partition (== slot 0).
  */
+uf2_load_result_t uf2_load_file_to(const char *name,
+                                   uint32_t base, uint32_t size,
+                                   uf2_load_stats_t *stats,
+                                   uf2_progress_cb progress);
+
+uf2_load_result_t uf2_validate_file_to(const char *name,
+                                       uint32_t base, uint32_t size,
+                                       uf2_load_stats_t *stats);
+
+/* Convenience: validate/load against the legacy partition (slot 0). */
 uf2_load_result_t uf2_load_file(const char *name,
                                 uf2_load_stats_t *stats,
                                 uf2_progress_cb progress);
-
-/*
- * Validate the named file WITHOUT touching flash (pass 1 only). Lets the menu
- * reject a file that has no in-range program blocks (e.g. a standalone UF2 still
- * linked at 0x10000000) while the display is still alive, before committing to
- * the destructive erase/program. Returns UF2_LOAD_OK iff there is at least one
- * programmable, page-aligned, in-range block for this chip/partition.
- */
 uf2_load_result_t uf2_validate_file(const char *name, uf2_load_stats_t *stats);
 
 const char *uf2_load_result_str(uf2_load_result_t r);

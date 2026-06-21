@@ -45,11 +45,26 @@
 #define FLASH_TOTAL_SIZE (16u * 1024u * 1024u)
 #endif
 
-/* Application partition: everything after the bootloader. */
+/* Application partition: everything after the bootloader. Used in legacy
+ * (single-partition) mode. In slot mode, APP_BASE_ADDR coincides with slot
+ * 0's base, so an emulator linked here doubles as a slot-0 image. */
 #define APP_PARTITION_OFFSET (BOOTLOADER_SIZE)                 /* XIP-relative   */
 #define APP_PARTITION_SIZE   (FLASH_TOTAL_SIZE - BOOTLOADER_SIZE)
 #define APP_BASE_ADDR        (XIP_BASE + APP_PARTITION_OFFSET) /* absolute (0x10100000) */
 #define APP_END_ADDR         (APP_BASE_ADDR + APP_PARTITION_SIZE)
+
+/* Pinned-slot layout, kept in sync with pico_shared/BootPartition.cmake via
+ * compile defs. Slot 0's base == APP_BASE_ADDR, so a legacy single-partition
+ * image is byte-equivalent to a slot-0 image. */
+#ifndef SLOT_SIZE
+#define SLOT_SIZE (2u * 1024u * 1024u)   /* 2 MB */
+#endif
+#ifndef SLOT_COUNT
+#define SLOT_COUNT 7u
+#endif
+#define SLOT_BASE(idx)  (APP_BASE_ADDR + (uint32_t)(idx) * SLOT_SIZE)
+#define SLOT_END(idx)   (SLOT_BASE(idx) + SLOT_SIZE)
+#define SLOTS_END_ADDR  (SLOT_BASE(SLOT_COUNT))   /* one past the last slot */
 
 /* RP2350 has 520 KB of SRAM (0x20000000 .. 0x20082000); used to sanity-check a
  * loaded image's initial stack pointer. */

@@ -19,14 +19,23 @@
 #define APP_LAUNCH_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
-/* Does APP_BASE_ADDR look like a valid, programmed image (sane SP + reset
- * vector, not just erased 0xFF)? */
+/* Does the image at `base` look like a valid, programmed application?
+ * Checks the vector table's initial SP (must be in SRAM, word-aligned) and
+ * reset vector (must be inside [base, base + SLOT_SIZE) with the Thumb bit). */
+bool app_launch_present_at(uint32_t base);
+
+/* Backward-compatible: checks APP_BASE_ADDR (== slot 0 == legacy partition). */
 bool app_launch_present(void);
 
-/* Tear down the bootloader's runtime and transfer control to the application.
- * Does not return on success. Returns (with the bootloader still running) only
- * if no valid image is present or the chosen launch method refused. */
+/* Tear down the bootloader's runtime and transfer control to the application
+ * whose vector table lives at `base`. Does not return on success. Returns
+ * (with the bootloader still running) only if no valid image is present or
+ * the chosen launch method refused. */
+void app_launch_run_at(uint32_t base);
+
+/* Backward-compatible: launches APP_BASE_ADDR. */
 void app_launch_run(void);
 
 #endif /* APP_LAUNCH_H */

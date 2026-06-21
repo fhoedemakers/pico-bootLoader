@@ -53,12 +53,14 @@ const char *uf2_load_result_str(uf2_load_result_t r)
     }
 }
 
-uf2_load_result_t uf2_load_file(const char *name,
-                                uf2_load_stats_t *stats,
-                                uf2_progress_cb progress)
+uf2_load_result_t uf2_load_file_to(const char *name,
+                                   uint32_t base, uint32_t size,
+                                   uf2_load_stats_t *stats,
+                                   uf2_progress_cb progress)
 {
     uf2_load_stats_t st = {0};
     st.lowest_addr = 0xFFFFFFFFu;
+    uint32_t end = base + size;
 
     if (!storage_open(name))
         return UF2_LOAD_OPEN_FAILED;
@@ -70,7 +72,7 @@ uf2_load_result_t uf2_load_file(const char *name,
         st.total_blocks++;
         uint32_t off, len;
         uf2_class_t c = uf2_classify_block(&blk, EXPECTED_UF2_FAMILY,
-                                           APP_BASE_ADDR, APP_END_ADDR, XIP_BASE,
+                                           base, end, XIP_BASE,
                                            &off, &len);
         switch (c) {
         case UF2_CLS_PROGRAM: {
@@ -107,7 +109,7 @@ uf2_load_result_t uf2_load_file(const char *name,
     while ((rc = read_block(&blk)) == 1) {
         uint32_t off, len;
         if (uf2_classify_block(&blk, EXPECTED_UF2_FAMILY,
-                               APP_BASE_ADDR, APP_END_ADDR, XIP_BASE,
+                               base, end, XIP_BASE,
                                &off, &len) != UF2_CLS_PROGRAM)
             continue;
 
@@ -130,10 +132,13 @@ uf2_load_result_t uf2_load_file(const char *name,
     return UF2_LOAD_OK;
 }
 
-uf2_load_result_t uf2_validate_file(const char *name, uf2_load_stats_t *stats)
+uf2_load_result_t uf2_validate_file_to(const char *name,
+                                       uint32_t base, uint32_t size,
+                                       uf2_load_stats_t *stats)
 {
     uf2_load_stats_t st = {0};
     st.lowest_addr = 0xFFFFFFFFu;
+    uint32_t end = base + size;
 
     if (!storage_open(name))
         return UF2_LOAD_OPEN_FAILED;
@@ -145,7 +150,7 @@ uf2_load_result_t uf2_validate_file(const char *name, uf2_load_stats_t *stats)
         st.total_blocks++;
         uint32_t off, len;
         uf2_class_t c = uf2_classify_block(&blk, EXPECTED_UF2_FAMILY,
-                                           APP_BASE_ADDR, APP_END_ADDR, XIP_BASE,
+                                           base, end, XIP_BASE,
                                            &off, &len);
         switch (c) {
         case UF2_CLS_PROGRAM: {
@@ -173,4 +178,16 @@ uf2_load_result_t uf2_validate_file(const char *name, uf2_load_stats_t *stats)
 
     if (stats) *stats = st;
     return UF2_LOAD_OK;
+}
+
+uf2_load_result_t uf2_load_file(const char *name,
+                                uf2_load_stats_t *stats,
+                                uf2_progress_cb progress)
+{
+    return uf2_load_file_to(name, APP_BASE_ADDR, APP_PARTITION_SIZE, stats, progress);
+}
+
+uf2_load_result_t uf2_validate_file(const char *name, uf2_load_stats_t *stats)
+{
+    return uf2_validate_file_to(name, APP_BASE_ADDR, APP_PARTITION_SIZE, stats);
 }

@@ -1,0 +1,16 @@
+# layout.txt for HW_CONFIG 8 (Adafruit Fruit Jam)
+#
+# Mapping of pinned slot -> UF2 filename, consumed by the bootloader's
+# "Setup / Rebuild flash" menu item. Each row flashes one slot. Lines starting
+# with '#' are comments; missing slots are left untouched.
+#
+# Each UF2 must be linked for the slot it claims (see README.md). The
+# bootloader pre-flights every row before touching flash; a mismatched build
+# is rejected on-screen.
+#
+# slot   uf2-filename
+0        picopcePlus_slot0_AdafruitFruitJam_arm_piousb.uf2
+1        piconesPlus_slot1_AdafruitFruitJam_arm_piousb.uf2
+2        picogenesisPlus_slot2_AdafruitFruitJam_arm_piousb.uf2
+3        picosmsPlus_slot3_AdafruitFruitJam_arm_piousb.uf2
+4        PicoPeanutGB_slot4_AdafruitFruitJam_arm_piousb.uf2

@@ -75,6 +75,8 @@ add_executable(${projectname}
     src/flash_writer.c
     src/app_launch.c
     src/storage_pico.c
+    src/slot_scan.c
+    src/setup.c
 )
 
 pico_set_program_name(${projectname} "${projectname}")
