@@ -34,6 +34,8 @@ bool storage_open(const char *name);
 bool storage_read(void *buf, uint32_t len, uint32_t *read);
 /* Seek back to the start of the currently open file. */
 bool storage_rewind(void);
+/* Seek to an absolute byte offset within the currently open file. */
+bool storage_seek(uint32_t offset);
 void storage_close(void);
 
 #endif /* STORAGE_H */

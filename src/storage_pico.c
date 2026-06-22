@@ -51,6 +51,12 @@ bool storage_rewind(void)
     return f_lseek(&s_file, 0) == FR_OK;
 }
 
+bool storage_seek(uint32_t offset)
+{
+    if (!s_file_open) return false;
+    return f_lseek(&s_file, offset) == FR_OK;
+}
+
 void storage_close(void)
 {
     if (s_file_open) { f_close(&s_file); s_file_open = false; }

@@ -1,0 +1,5 @@
+picogenesisPlus;md;Sega Genesis/Mega Drive
+piconesPlus;nes;Nintendo Entertainment System
+picopcePlus;pce_cd;Nec Pc Engine
+PicoPeanutGB;gb_gbc;Nintendo Game Boy/Game Boy Color
+picosmsPlus;sms_gg;Sega Master System/Game Gear
