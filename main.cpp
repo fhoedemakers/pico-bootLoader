@@ -505,11 +505,18 @@ int main()
     int  slide_p        = 0;        // 0..SCREENWIDTH, pixels of the new image visible
     int  slide_dir      = 0;        // +1 = new enters from right, -1 = from left, 0 = idle
 
-    auto load_image_into = [](int idx, uint16_t *dest) {
+    // Single loader that picks the full-res or half-res variant based on the
+    // target buffer's size. Used for both cur (always full) and next (half
+    // when no PSRAM, full otherwise).
+    auto load_image_into = [](int idx, uint16_t *dest, bool half_res) {
         if (idx >= 0 && idx < g_emu_count && g_emus[idx].image_key[0]) {
-            if (gui_load_image(g_emus[idx].image_key, dest)) return;
+            bool ok = half_res
+                ? gui_load_image_half_res(g_emus[idx].image_key, dest)
+                : gui_load_image(g_emus[idx].image_key, dest);
+            if (ok) return;
         }
-        gui_fill_solid(dest, 0);    // black placeholder on missing/invalid asset
+        if (half_res) gui_fill_solid_half_res(dest, 0);
+        else          gui_fill_solid(dest, 0);
     };
 
     auto enter_graphical = [&]() {
@@ -519,7 +526,7 @@ int main()
             graphical_mode = false;
             return;
         }
-        load_image_into(sel, gui_buf_cur());
+        load_image_into(sel, gui_buf_cur(), false);   // cur is always full res
         slide_p   = 0;
         slide_dir = 0;
     };
@@ -556,20 +563,26 @@ int main()
         // Mode-specific navigation.
         if (graphical_mode && buffers_ready) {
             if (slide_dir == 0) {
-                // Idle: a fresh LEFT/RIGHT kicks off a slide to the neighbour.
+                // Idle: a fresh LEFT/RIGHT picks the neighbour.
                 // Wraps around at the ends so the user can keep cycling.
-                if ((pushed & Btn::RIGHT) && g_emu_count > 1) {
-                    sel = (sel + 1) % g_emu_count;
-                    LOG("RIGHT -> sel=%d (%s)", sel, g_emus[sel].label);
-                    load_image_into(sel, gui_buf_next());
-                    slide_dir = +1;
-                    slide_p   = 0;
-                } else if ((pushed & Btn::LEFT) && g_emu_count > 1) {
-                    sel = (sel + g_emu_count - 1) % g_emu_count;
-                    LOG("LEFT -> sel=%d (%s)", sel, g_emus[sel].label);
-                    load_image_into(sel, gui_buf_next());
-                    slide_dir = -1;
-                    slide_p   = 0;
+                // gui_buf_next() is NULL on SRAM-only builds (no PSRAM) --
+                // in that case we snap-load the new image instead of sliding.
+                bool right = (pushed & Btn::RIGHT) != 0;
+                bool left  = (pushed & Btn::LEFT)  != 0;
+                if ((right || left) && g_emu_count > 1) {
+                    sel = right ? (sel + 1) % g_emu_count
+                                : (sel + g_emu_count - 1) % g_emu_count;
+                    LOG("%s -> sel=%d (%s)",
+                        right ? "RIGHT" : "LEFT", sel, g_emus[sel].label);
+                    uint16_t *next_buf = gui_buf_next();
+                    if (next_buf) {
+                        load_image_into(sel, next_buf, gui_next_is_half_res());
+                        slide_dir = right ? +1 : -1;
+                        slide_p   = 0;
+                    } else {
+                        // No slide buffer at all: just reload cur with the new image.
+                        load_image_into(sel, gui_buf_cur(), false);
+                    }
                 }
             } else {
                 // Mid-slide: advance progress. Ignore further LEFT/RIGHT until done.
@@ -609,10 +622,19 @@ int main()
         if (graphical_mode && buffers_ready) {
             gui_draw_frame(gui_buf_cur(),
                            slide_dir != 0 ? gui_buf_next() : nullptr,
-                           slide_p, slide_dir);
+                           slide_p, slide_dir,
+                           gui_next_is_half_res());
             if (slide_dir != 0 && slide_p >= SCREENWIDTH) {
-                // Slide complete: the just-revealed image becomes the new current.
-                gui_swap_buffers();
+                if (gui_next_is_half_res()) {
+                    // Half-res slide: don't swap (next is a 160x120 scratch).
+                    // Reload cur at full res so the static display sharpens
+                    // back up. Brief snap from blocky to full-res is the
+                    // tradeoff for keeping the animation on no-PSRAM configs.
+                    load_image_into(sel, gui_buf_cur(), false);
+                } else {
+                    // Both buffers full-res: just swap pointers.
+                    gui_swap_buffers();
+                }
                 slide_dir = 0;
                 slide_p   = 0;
             }
