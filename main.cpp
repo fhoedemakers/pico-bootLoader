@@ -53,6 +53,8 @@ extern "C" {
 #include "app_launch.h"
 #include "storage.h"
 #include "program_name.h"
+#include "emulators_txt.h"
+#include "gui.h"
 #include <hardware/divider.h>
 }
 
@@ -85,11 +87,15 @@ void splash() {}
 namespace {
 
 #define PROG_NAME_MAX 32
+#define IMAGE_KEY_MAX 16
+#define DISPLAY_NAME_MAX 40
 
 struct SdEmu {
-    char filename[ROMLISTER_MAXPATH]; // basename
-    char label[PROG_NAME_MAX];        // shown in the menu (program_name preferred)
-    char prog_name[PROG_NAME_MAX];    // binary_info match key ("" if not extractable)
+    char filename[ROMLISTER_MAXPATH];        // basename
+    char label[PROG_NAME_MAX];               // shown in the menu (program_name preferred)
+    char prog_name[PROG_NAME_MAX];           // binary_info match key ("" if not extractable)
+    char image_key[IMAGE_KEY_MAX];           // emulators.txt column 2 ("md", "nes", ...)
+    char display_name[DISPLAY_NAME_MAX];     // emulators.txt column 3 (human-readable)
 };
 
 char  g_emuDir[32];                   // "/emu/8"
@@ -97,6 +103,11 @@ SdEmu g_emus[32];
 int   g_emu_count = 0;
 char  g_flash_prog_name[PROG_NAME_MAX] = {0};   // currently-flashed image's program name
 int   g_flash_idx = -1;                         // index into g_emus, or -1 if none matches
+
+// User-visible mode toggle (SELECT). Persisted to /emu/.guimode across reboots.
+#define EMULATORS_TXT_PATH "/emu/emulators.txt"
+#define GUI_MODE_PATH      "/emu/.guimode"
+#define GUI_SLIDE_PX_PER_FRAME 20            // 320 / 20 = 16 frames ≈ 270 ms
 
 // Fallback label derived from filename when binary_info parsing fails:
 //   "picogenesisPlus_AdafruitFruitJam_arm_piousb.uf2" -> "picogenesisPlus"
@@ -147,18 +158,23 @@ void drawMenu(int sel, int top, int visible)
         int bg = seld ? COL_FG : COL_BG;
         int row = STARTROW + i;
         putText(0, row, bar, fg, bg);
+        // Prefer the friendly name from emulators.txt; fall back to the
+        // binary_info / filename-derived label when the txt has no row for
+        // this prog_name.
+        const char *name = g_emus[idx].display_name[0] ?
+                           g_emus[idx].display_name : g_emus[idx].label;
         char line[SCREEN_COLS + 1];
         // Two prefix characters: selection marker, then flashed marker.
         // ">" = cursor; "*" = currently in flash. Either or both, or neither.
         snprintf(line, sizeof(line), "%c %c %s",
                  seld ? '>' : ' ',
                  flashed ? '*' : ' ',
-                 g_emus[idx].label);
+                 name);
         putText(1, row, line, fg, bg);
     }
 
     centerText(SCREEN_ROWS - 4, "*  = in flash (no flash on B)", COL_FG, COL_BG);
-    centerText(SCREEN_ROWS - 3, "UP / DOWN : choose", COL_FG, COL_BG);
+    centerText(SCREEN_ROWS - 3, "UP / DOWN : choose   SELECT : graphical", COL_FG, COL_BG);
     centerText(SCREEN_ROWS - 2, "B : start", COL_FG, COL_BG);
 }
 
@@ -235,7 +251,9 @@ void scanEmulators()
         char full[FF_MAX_LFN];
         snprintf(full, sizeof(full), "%s/%s", g_emuDir, e.filename);
 
-        e.prog_name[0] = '\0';
+        e.prog_name[0]    = '\0';
+        e.image_key[0]    = '\0';
+        e.display_name[0] = '\0';
         bool ok = program_name_from_uf2_file(full, e.prog_name, sizeof(e.prog_name));
         if (ok && e.prog_name[0]) {
             strncpy(e.label, e.prog_name, sizeof(e.label) - 1);
@@ -245,8 +263,15 @@ void scanEmulators()
             LOG("  binary_info parse FAILED for %s; fallback label=\"%s\"",
                 e.filename, e.label);
         }
-        LOG("  [%2d] %-40s  label=\"%s\"  prog_name=\"%s\"",
-            g_emu_count, e.filename, e.label, e.prog_name);
+        // Pull the friendly name + image key from emulators.txt by prog_name.
+        // Missing rows just leave both fields empty (graphical mode skips them).
+        if (e.prog_name[0]) {
+            emulators_txt_lookup(e.prog_name,
+                                 e.image_key,    sizeof(e.image_key),
+                                 e.display_name, sizeof(e.display_name));
+        }
+        LOG("  [%2d] %-40s  prog_name=\"%s\"  img_key=\"%s\"  display=\"%s\"",
+            g_emu_count, e.filename, e.prog_name, e.image_key, e.display_name);
         g_emu_count++;
     }
     LOG("Found %d emulator UF2(s) in %s.", g_emu_count, g_emuDir);
@@ -405,6 +430,13 @@ int main()
         for (;;) { tuh_task(); DrawScreen(-1); sleep_ms(16); }
     }
 
+    // Pre-load the emulators.txt table so scanEmulators() can attach a friendly
+    // display name and image_key to each SdEmu entry as it goes. Missing or
+    // unreadable file is non-fatal -- text mode still shows the prog_name
+    // fallback labels and graphical mode just has nothing to show.
+    LOG("Loading %s...", EMULATORS_TXT_PATH);
+    emulators_txt_load(EMULATORS_TXT_PATH);
+
     // Parse program_name from every .uf2 on SD and from the in-flash image.
     // Briefly tell the user what's happening (this can take a second or two
     // while we seek through 5+ files on slow SD cards).
@@ -422,13 +454,44 @@ int main()
     }
 
     // --- PICKER LOOP --------------------------------------------------------
-    LOG("Entering picker loop. D-pad: navigate, A: start.");
+    LOG("Entering picker loop. D-pad: navigate, A: start, SELECT: toggle graphical.");
     const int visible = ENDROW - STARTROW + 1;
     int sel = (g_flash_idx >= 0) ? g_flash_idx : 0;
     int top = 0;
     if (sel >= visible) top = sel - visible + 1;
     uint32_t prevButtons = 0;
     using Btn = io::GamePadState::Button;
+
+    // Graphical-mode state. Buffers are allocated lazily on first entry so
+    // text-only sessions don't pay the ~300 KB cost.
+    bool graphical_mode = false;
+    bool buffers_ready  = false;
+    int  slide_p        = 0;        // 0..SCREENWIDTH, pixels of the new image visible
+    int  slide_dir      = 0;        // +1 = new enters from right, -1 = from left, 0 = idle
+
+    auto load_image_into = [](int idx, uint16_t *dest) {
+        if (idx >= 0 && idx < g_emu_count && g_emus[idx].image_key[0]) {
+            if (gui_load_image(g_emus[idx].image_key, dest)) return;
+        }
+        gui_fill_solid(dest, 0);    // black placeholder on missing/invalid asset
+    };
+
+    auto enter_graphical = [&]() {
+        if (!buffers_ready) buffers_ready = gui_buffers_alloc();
+        if (!buffers_ready) {
+            LOG("GUI buffer allocation failed; staying in text mode.");
+            graphical_mode = false;
+            return;
+        }
+        load_image_into(sel, gui_buf_cur());
+        slide_p   = 0;
+        slide_dir = 0;
+    };
+
+    // Restore the last mode the user left us in (file lives on the SD card).
+    graphical_mode = gui_load_mode(GUI_MODE_PATH);
+    LOG("Initial menu mode: %s", graphical_mode ? "graphical" : "text");
+    if (graphical_mode) enter_graphical();
 
     for (;;) {
         tuh_task();
@@ -446,17 +509,52 @@ int main()
         uint32_t pushed = btns & ~prevButtons;
         prevButtons = btns;
 
-        if (pushed & Btn::UP)   {
-            if (sel > 0) { sel--; LOG("UP -> sel=%d (%s)", sel, g_emus[sel].label); }
+        // SELECT: toggle modes regardless. Persist so next boot lands the same way.
+        if (pushed & Btn::SELECT) {
+            graphical_mode = !graphical_mode;
+            LOG("SELECT -> mode=%s", graphical_mode ? "graphical" : "text");
+            gui_save_mode(GUI_MODE_PATH, graphical_mode);
+            if (graphical_mode) enter_graphical();
         }
-        if (pushed & Btn::DOWN) {
-            if (sel < g_emu_count - 1) {
-                sel++; LOG("DOWN -> sel=%d (%s)", sel, g_emus[sel].label);
-            }
-        }
-        if (top > sel)              top = sel;
-        if (sel >= top + visible)   top = sel - visible + 1;
 
+        // Mode-specific navigation.
+        if (graphical_mode && buffers_ready) {
+            if (slide_dir == 0) {
+                // Idle: a fresh LEFT/RIGHT kicks off a slide to the neighbour.
+                // Wraps around at the ends so the user can keep cycling.
+                if ((pushed & Btn::RIGHT) && g_emu_count > 1) {
+                    sel = (sel + 1) % g_emu_count;
+                    LOG("RIGHT -> sel=%d (%s)", sel, g_emus[sel].label);
+                    load_image_into(sel, gui_buf_next());
+                    slide_dir = +1;
+                    slide_p   = 0;
+                } else if ((pushed & Btn::LEFT) && g_emu_count > 1) {
+                    sel = (sel + g_emu_count - 1) % g_emu_count;
+                    LOG("LEFT -> sel=%d (%s)", sel, g_emus[sel].label);
+                    load_image_into(sel, gui_buf_next());
+                    slide_dir = -1;
+                    slide_p   = 0;
+                }
+            } else {
+                // Mid-slide: advance progress. Ignore further LEFT/RIGHT until done.
+                slide_p += GUI_SLIDE_PX_PER_FRAME;
+                if (slide_p > SCREENWIDTH) slide_p = SCREENWIDTH;
+            }
+        } else {
+            // Text mode (also the fallback when GUI buffers can't be allocated).
+            if (pushed & Btn::UP) {
+                if (sel > 0) { sel--; LOG("UP -> sel=%d (%s)", sel, g_emus[sel].label); }
+            }
+            if (pushed & Btn::DOWN) {
+                if (sel < g_emu_count - 1) {
+                    sel++; LOG("DOWN -> sel=%d (%s)", sel, g_emus[sel].label);
+                }
+            }
+            if (top > sel)              top = sel;
+            if (sel >= top + visible)   top = sel - visible + 1;
+        }
+
+        // A always launches the selected entry.
         if (pushed & Btn::A) {
             LOG("A pressed. sel=%d (%s) flashed_idx=%d",
                 sel, g_emus[sel].label, g_flash_idx);
@@ -471,7 +569,20 @@ int main()
             prevButtons = ~0u;
         }
 
-        drawMenu(sel, top, visible);
-        DrawScreen(-1);
+        // Render.
+        if (graphical_mode && buffers_ready) {
+            gui_draw_frame(gui_buf_cur(),
+                           slide_dir != 0 ? gui_buf_next() : nullptr,
+                           slide_p, slide_dir);
+            if (slide_dir != 0 && slide_p >= SCREENWIDTH) {
+                // Slide complete: the just-revealed image becomes the new current.
+                gui_swap_buffers();
+                slide_dir = 0;
+                slide_p   = 0;
+            }
+        } else {
+            drawMenu(sel, top, visible);
+            DrawScreen(-1);
+        }
     }
 }

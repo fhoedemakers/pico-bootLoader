@@ -76,6 +76,8 @@ add_executable(${projectname}
     src/app_launch.c
     src/storage_pico.c
     src/program_name.c
+    src/emulators_txt.c
+    src/gui.cpp
 )
 
 pico_set_program_name(${projectname} "${projectname}")
