@@ -78,6 +78,7 @@ add_executable(${projectname}
     src/program_name.c
     src/emulators_txt.c
     src/gui.cpp
+    src/progress_bar.cpp
 )
 
 pico_set_program_name(${projectname} "${projectname}")

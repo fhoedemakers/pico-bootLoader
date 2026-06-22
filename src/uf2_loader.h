@@ -25,9 +25,17 @@ typedef struct {
     uint32_t highest_addr;     /* one past the highest address written          */
 } uf2_load_stats_t;
 
-/* Optional progress callback: phase is "Erasing"/"Writing"/"Verifying",
- * done/total are block counts. May be NULL. */
-typedef void (*uf2_progress_cb)(const char *phase, uint32_t done, uint32_t total);
+/* Phase codes for the progress callback. Integer codes (rather than string
+ * literals) so the callback path can stay SRAM-resident -- no flash reads to
+ * compare against. See [[framework-flash-while-running]] for why. */
+#define UF2_PROGRESS_ERASE 0
+#define UF2_PROGRESS_WRITE 1
+
+/* Optional progress callback. done/total are in arbitrary per-phase units:
+ *   UF2_PROGRESS_ERASE : called twice with (0,1) and (1,1) bracketing the erase.
+ *   UF2_PROGRESS_WRITE : called once per page programmed, done=1..total.
+ * May be NULL. */
+typedef void (*uf2_progress_cb)(int phase, uint32_t done, uint32_t total);
 
 /*
  * Program the named file (must already be openable via storage_open) into the

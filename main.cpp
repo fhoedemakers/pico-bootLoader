@@ -55,8 +55,25 @@ extern "C" {
 #include "program_name.h"
 #include "emulators_txt.h"
 #include "gui.h"
+#include "progress_bar.h"
 #include <hardware/divider.h>
 }
+
+// Progress-bar colours, picked at compile time to match whichever 16-bit
+// pixel format the active backend uses. Hard-coded so the SRAM-resident
+// flashProgress callback never has to dereference a palette in flash.
+//   HSTX  : RGB555 (5-5-5-1, low bit ignored)
+//   !HSTX : RGB444 packed as 0x0RGB (this codebase's PicoDVI encoding,
+//           see CC() in pico_shared/menu.cpp)
+#if HSTX
+#define PB_COL_BORDER 0x0000u   // black
+#define PB_COL_EMPTY  0x7FFFu   // white (matches menu background)
+#define PB_COL_FILL   0x03E0u   // pure green
+#else
+#define PB_COL_BORDER 0x0000u   // black
+#define PB_COL_EMPTY  0x0FFFu   // white
+#define PB_COL_FILL   0x00F0u   // pure green
+#endif
 
 // DrawScreen() has external linkage in pico_shared/menu.cpp but is not declared
 // in menu.h. It renders the 40x30 charcell screenBuffer into the active video
@@ -78,9 +95,10 @@ void splash() {}
 #define COL_FG  DEFAULT_FGCOLOR   // dark text
 #define COL_BG  DEFAULT_BGCOLOR   // light background
 
-// Brief on-screen pause (ms) so the "Flashing..." notice is readable before
-// core1 is reset and the HDMI signal drops out.
-#define FLASH_NOTICE_MS  1500
+// Brief on-screen pause (ms) so the "Flashing..." notice registers before
+// the bar starts moving. The bar itself is now live during the erase so we
+// don't need a long read-time -- just enough to acknowledge the press.
+#define FLASH_NOTICE_MS  500
 
 #define LOG(fmt, ...) printf("[emuLoader] " fmt "\n", ##__VA_ARGS__)
 
@@ -217,14 +235,25 @@ void logAppPartitionState(const char *when)
         when, (unsigned)sp, (unsigned)reset, (int)present);
 }
 
-void flashProgress(const char *phase, uint32_t done, uint32_t total)
+// __not_in_flash_func: the whole callback path is SRAM-resident so we never
+// have to worry about XIP state. No printf/LOG inside -- bookend logging
+// happens in flashAndLaunch around uf2_load_file. The throttle (done & 0x3F)
+// keeps redraw cost down for large images (otherwise ~16 K calls).
+extern "C" void __not_in_flash_func(flashProgress)(int phase, uint32_t done, uint32_t total)
 {
-    bool isWriting = (strcmp(phase, "Writing") == 0);
-    bool boundary  = (done == 0 || done == total);
-    if (boundary || !isWriting || (done & 0x3F) == 0) {
-        unsigned pct = (total > 0) ? (unsigned)(((uint64_t)done * 100) / total) : 0;
-        LOG("  %s %u / %u  (%u%%)", phase, (unsigned)done, (unsigned)total, pct);
+    // Combined percentage: erase contributes 0..10, write contributes 10..100.
+    uint32_t pct;
+    if (phase == UF2_PROGRESS_ERASE) {
+        pct = (total > 0) ? (done * 10u / total) : 0;
+    } else {
+        uint32_t w = (total > 0) ? (done * 90u / total) : 0;
+        pct = 10u + w;
+        // Throttle write-phase redraws: a 2 MB image is ~8192 pages, plenty
+        // of opportunity to skip frames where pct didn't move visibly.
+        bool boundary = (done == 0 || done == total);
+        if (!boundary && (done & 0x3F) != 0) return;
     }
+    progress_bar_draw(pct, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
 }
 
 // Read the SD directory, parse each emulator's program_name from its binary_info,
@@ -335,19 +364,25 @@ void flashAndLaunch(int idx)
         return;
     }
 
-    // Show the notice and give core1 a moment to push it to the display, then
-    // pause so the user can actually read it before HSTX goes dark for the
-    // flash op.
+    // Show the notice. Unlike before, core1 keeps running through the flash
+    // op so the bar below this text updates in real time -- see
+    // framework-flash-while-running.md for the SRAM-residence audit that
+    // makes this safe.
     showMessage("Flashing", g_emus[idx].label, "Do not power off.");
     DrawScreen(-1);
     idleFor(FLASH_NOTICE_MS);
 
-    LOG("Pre-flight OK. Committing to flash; resetting core1 and erasing/programming.");
-    multicore_reset_core1();
-    LOG("core1 reset; beginning flash sequence");
+    // Paint an empty 0% bar so the user sees the bar's box appear before any
+    // flash writes start. Colours are compile-time literals (see PB_COL_*),
+    // so the flash callback never has to dereference flash for them.
+    progress_bar_draw(0, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
+
+    LOG("Pre-flight OK. core1 left running; beginning flash sequence.");
 
     uf2_load_result_t r = uf2_load_file(full, &st, flashProgress);
     if (r == UF2_LOAD_OK) {
+        // Force a final 100% paint before we tear down core1.
+        progress_bar_draw(100, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
         LOG("Flash OK: %u blocks written to 0x%08X..0x%08X",
             (unsigned)st.programmed_blocks,
             (unsigned)st.lowest_addr, (unsigned)st.highest_addr);
@@ -355,7 +390,8 @@ void flashAndLaunch(int idx)
         if (app_launch_present()) {
             LOG("Launching %s; bye!", g_emus[idx].label);
             stdio_flush();
-            app_launch_run();   // no return on success
+            multicore_reset_core1();   // hand HSTX over; emulator brings its own driver up
+            app_launch_run();          // no return on success
             LOG("app_launch_run() returned unexpectedly.");
         } else {
             LOG("ERROR: app_launch_present()=false after flash; rebooting.");

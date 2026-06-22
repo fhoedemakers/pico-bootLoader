@@ -95,10 +95,25 @@ uf2_load_result_t uf2_load_file(const char *name,
     if (rc < 0)               { storage_close(); return UF2_LOAD_READ_ERROR; }
     if (st.programmed_blocks == 0) { storage_close(); return UF2_LOAD_NO_MATCHING_BLOCKS; }
 
-    /* ---------- Erase exactly the range we will write ---------- */
-    if (progress) progress("Erasing", 0, 1);
-    flash_writer_erase(st.lowest_addr - XIP_BASE, st.highest_addr - st.lowest_addr);
-    if (progress) progress("Erasing", 1, 1);
+    /* ---------- Erase exactly the range we will write ----------
+     * Loop one sector at a time so the progress callback fires per sector
+     * (~50 ms on RP2350 + QSPI). A single big flash_range_erase would only
+     * give us two ticks (before/after) and leave the on-screen bar frozen
+     * for many seconds on a 1-2 MB image. The per-sector bootrom overhead
+     * is negligible vs the erase time itself. */
+    {
+        uint32_t off_lo  = st.lowest_addr  - XIP_BASE;
+        uint32_t off_hi  = st.highest_addr - XIP_BASE;
+        uint32_t sec_lo  = off_lo & ~(FLASH_SECTOR_SIZE - 1u);
+        uint32_t sec_hi  = (off_hi + FLASH_SECTOR_SIZE - 1u) & ~(FLASH_SECTOR_SIZE - 1u);
+        uint32_t total   = (sec_hi - sec_lo) / FLASH_SECTOR_SIZE;
+        uint32_t done    = 0;
+        if (progress) progress(UF2_PROGRESS_ERASE, 0, total);
+        for (uint32_t off = sec_lo; off < sec_hi; off += FLASH_SECTOR_SIZE) {
+            flash_writer_erase(off, FLASH_SECTOR_SIZE);
+            if (progress) progress(UF2_PROGRESS_ERASE, ++done, total);
+        }
+    }
 
     /* ---------- Pass 2: program + verify ---------- */
     if (!storage_rewind()) { storage_close(); return UF2_LOAD_READ_ERROR; }
@@ -121,7 +136,7 @@ uf2_load_result_t uf2_load_file(const char *name,
             storage_close();
             return UF2_LOAD_VERIFY_FAILED;
         }
-        if (progress) progress("Writing", ++done, st.programmed_blocks);
+        if (progress) progress(UF2_PROGRESS_WRITE, ++done, st.programmed_blocks);
     }
     storage_close();
     if (rc < 0) return UF2_LOAD_READ_ERROR;
