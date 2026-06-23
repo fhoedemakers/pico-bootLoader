@@ -11,8 +11,9 @@ currently sitting in the application partition is **highlighted** as *in flash*:
 
 - B-press on the **highlighted** (in-flash) entry → launches immediately via
   VTOR jump. No flash op, no SD I/O. Sub-second.
-- B-press on any **other** entry → shows a brief *"Flashing…"* notice, then
-  flashes that `.uf2` into the application partition and launches it.
+- B-press on any **other** entry → flashes that `.uf2` into the application
+  partition (with a live 240×20 progress bar drawn straight into the HSTX
+  framebuffer) and launches it.
 
 Because the bootloader only *jumps* (it never hands over the boot vector), any
 reset / power-cycle returns to the menu.
@@ -105,6 +106,37 @@ On boot, after listing SD `.uf2`s, the bootloader:
 If the resident image cannot be parsed (e.g. flash is erased, or it's a
 non-SDK image), no entry is highlighted and every choice flashes.
 
+## Menu modes
+
+**SELECT** toggles between two pickers; the choice is persisted to
+`/emu/.guimode` and restored on next boot (defaults to graphical the first
+time).
+
+- **Text mode** — the plain list of `.uf2` entries described above, with the
+  resident image highlighted.
+- **Graphical mode** — a full-screen 320×240 image per emulator, slid in/out
+  with LEFT/RIGHT (wrapping at the ends). Names and artwork keys come from
+  `/emu/emulators.txt`, one record per line:
+
+  ```
+  <program_name>;<image_key>;<display_name>
+  picogenesisPlus;md;Sega Genesis/Mega Drive
+  piconesPlus;nes;Nintendo Entertainment System
+  ```
+
+  `program_name` matches the value parsed from each UF2's `binary_info`
+  (case-insensitive). `image_key` picks `/emu/assets/<key>.555` on HSTX
+  (`.444` on PicoDVI). `display_name` is the label the text picker shows
+  when present. A sample `emulators.txt` and the PNG/`.555`/`.444` art for
+  HW_CONFIG 8 ship in [`uf2/`](uf2/) and [`assets/`](assets/).
+
+On SRAM-only boards (no PSRAM) two full-resolution slide buffers (~300 KB)
+don't fit, so the *next* buffer is allocated at 160×120 (~38 KB) and
+upscaled 2× per scanline during the slide. After the slide lands, the
+visible image is reloaded at full 320×240 from SD — there's a brief
+blocky-to-sharp snap, only on no-PSRAM hardware. PSRAM configs keep the
+two-full-res-buffers + pointer-swap path.
+
 ## ROM-load reboot interaction (no-PSRAM boards)
 
 On PSRAM-less boards an emulator reboots itself (`watchdog_enable`) to flash a
@@ -123,9 +155,3 @@ the menu. On HW_CONFIG 8 (PSRAM) ROMs load to PSRAM and this path is dormant.
   slots. Preserved for reference; the per-emulator build matrix it required
   was the reason this branch replaced it.
 
-## Future work
-
-The [`assets/`](assets/) folder contains per-system PNGs (nes, pce, md, sms,
-gb, …) intended for a future graphical picker. The current menu already
-exposes each emulator's canonical program name, which is the lookup key a
-GUI renderer will use to pick the right icon.
