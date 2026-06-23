@@ -45,6 +45,8 @@
 #include "menu.h"
 #include "settings.h"
 #include "gamepad.h"
+#include "nespad.h"
+#include "wiipad.h"
 #include "tusb.h"
 
 extern "C" {
@@ -191,9 +193,18 @@ void drawMenu(int sel, int top, int visible)
         putText(1, row, line, fg, bg);
     }
 
-    centerText(SCREEN_ROWS - 4, "*  = in flash (no flash on B)", COL_FG, COL_BG);
+    // buttonLabel1 is the label of the button that triggers Btn::A on the
+    // attached pad (e.g. "A" on NES, "B" on XInput, "O" on PlayStation).
+    char buttonLabel1[2];
+    char buttonLabel2[2];
+    getButtonLabels(buttonLabel1, buttonLabel2);
+
+    char hint[SCREEN_COLS + 1];
+    snprintf(hint, sizeof(hint), "*  = in flash (no flash on %s)", buttonLabel1);
+    centerText(SCREEN_ROWS - 4, hint, COL_FG, COL_BG);
     centerText(SCREEN_ROWS - 3, "UP / DOWN : choose   SELECT : graphical", COL_FG, COL_BG);
-    centerText(SCREEN_ROWS - 2, "B : start", COL_FG, COL_BG);
+    snprintf(hint, sizeof(hint), "%s : start", buttonLabel1);
+    centerText(SCREEN_ROWS - 2, hint, COL_FG, COL_BG);
 }
 
 void showMessage(const char *l1, const char *l2, const char *l3)
@@ -339,6 +350,9 @@ void launchInFlash()
         idleFor(2500);
         return;
     }
+#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+    wiipad_end();              // release I2C so the emulator can re-init it cleanly
+#endif
     multicore_reset_core1();   // bootloader's HSTX driver lives on core1; quiesce
     stdio_flush();
     app_launch_run();          // VTOR jump; no return on success
@@ -390,6 +404,9 @@ void flashAndLaunch(int idx)
         if (app_launch_present()) {
             LOG("Launching %s; bye!", g_emus[idx].label);
             stdio_flush();
+#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+            wiipad_end();              // free I2C for the emulator's own init
+#endif
             multicore_reset_core1();   // hand HSTX over; emulator brings its own driver up
             app_launch_run();          // no return on success
             LOG("app_launch_run() returned unexpectedly.");
@@ -406,6 +423,9 @@ void flashAndLaunch(int idx)
     // guard prevents jumping into a half-written partition.
     LOG("Rebooting bootloader to recover a clean state.");
     stdio_flush();
+#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+    wiipad_end();
+#endif
     watchdog_reboot(0, 0, 0);
     for (;;) tight_loop_contents();
 }
@@ -537,8 +557,10 @@ int main()
     if (graphical_mode) enter_graphical();
 
     for (;;) {
-        tuh_task();
         Frens::PaceFrames60fps(false, true);
+#if NES_PIN_CLK != -1
+        nespad_read_start();
+#endif
         auto count =
 #if !HSTX
         dvi_->getFrameCounter();
@@ -547,8 +569,62 @@ int main()
 #endif
         auto onOff = hw_divider_s32_quotient_inlined(count, 60) & 1;
         Frens::blinkLed(onOff);
+#if NES_PIN_CLK != -1
+        nespad_read_finish();   // populates nespad_states[]
+#endif
+        tuh_task();
+#if WIIPAD_DELAYED_START and WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+        // Probe once per second (onOff toggles at 60 frames) so we pick up a
+        // pad that was plugged in after boot. wiipad_begin() is a no-op once
+        // connected.
+        if (!wiipad_is_connected() && onOff) {
+            wiipad_begin();
+        }
+#endif
         uint32_t btns = io::getCurrentGamePadState(0).buttons |
                         io::getCurrentGamePadState(1).buttons;
+        // nespad_states[] and wiipad_read() use their own bit layouts (NES
+        // bus order / Wii nunchuk layout). Translate them into the same
+        // io::GamePadState::Button bits the rest of this loop checks via Btn::*.
+#if NES_PIN_CLK != -1 || NES_PIN_CLK_1 != -1
+        auto nesToBtn = [](uint8_t s) -> uint32_t {
+            // NES wire order: 0x01=Right, 0x02=Left, 0x04=Down, 0x08=Up,
+            //                 0x10=Start, 0x20=Select, 0x40=B, 0x80=A.
+            uint32_t b = 0;
+            if (s & 0x01) b |= Btn::RIGHT;
+            if (s & 0x02) b |= Btn::LEFT;
+            if (s & 0x04) b |= Btn::DOWN;
+            if (s & 0x08) b |= Btn::UP;
+            if (s & 0x10) b |= Btn::START;
+            if (s & 0x20) b |= Btn::SELECT;
+            if (s & 0x40) b |= Btn::B;
+            if (s & 0x80) b |= Btn::A;
+            return b;
+        };
+#endif
+#if NES_PIN_CLK != -1
+        btns |= nesToBtn(nespad_states[0]);
+#endif
+#if NES_PIN_CLK_1 != -1
+        btns |= nesToBtn(nespad_states[1]);
+#endif
+#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+        {
+            // wiipad_read() layout (see wiipad.cpp): A=1<<0, B=1<<1, SELECT=1<<2,
+            // START=1<<3, UP=1<<4, DOWN=1<<5, LEFT=1<<6, RIGHT=1<<7, X=1<<8, Y=1<<9.
+            uint16_t w = wiipad_read();
+            if (w & (1 << 0)) btns |= Btn::A;
+            if (w & (1 << 1)) btns |= Btn::B;
+            if (w & (1 << 2)) btns |= Btn::SELECT;
+            if (w & (1 << 3)) btns |= Btn::START;
+            if (w & (1 << 4)) btns |= Btn::UP;
+            if (w & (1 << 5)) btns |= Btn::DOWN;
+            if (w & (1 << 6)) btns |= Btn::LEFT;
+            if (w & (1 << 7)) btns |= Btn::RIGHT;
+            if (w & (1 << 8)) btns |= Btn::X;
+            if (w & (1 << 9)) btns |= Btn::Y;
+        }
+#endif
         uint32_t pushed = btns & ~prevButtons;
         prevButtons = btns;
 
