@@ -23,6 +23,17 @@
 #define EXPECTED_UF2_FAMILY UF2_FAMILY_RP2350_ARM_S
 #endif
 
+/* Runtime upper bound for the app partition. Defaults to the build-time
+ * APP_END_ADDR; main() narrows it to the real chip's capacity once the SD/PSRAM
+ * init has run and storage_get_flash_capacity() is known good. */
+static uint32_t g_app_end_addr = APP_END_ADDR;
+
+void uf2_loader_set_app_end_addr(uint32_t app_end_addr)
+{
+    if (app_end_addr > APP_BASE_ADDR && app_end_addr <= APP_END_ADDR)
+        g_app_end_addr = app_end_addr;
+}
+
 /* Read exactly sizeof(uf2_block_t) bytes. Returns 1 on a full block, 0 on clean
  * EOF, -1 on error or a short (corrupt) trailing block. */
 static int read_block(uf2_block_t *blk)
@@ -49,6 +60,7 @@ const char *uf2_load_result_str(uf2_load_result_t r)
     case UF2_LOAD_READ_ERROR:          return "read error";
     case UF2_LOAD_BAD_FILE:            return "corrupt or misaligned UF2";
     case UF2_LOAD_VERIFY_FAILED:       return "flash verify mismatch";
+    case UF2_LOAD_TOO_LARGE:           return "image exceeds available flash";
     default:                           return "unknown";
     }
 }
@@ -70,7 +82,7 @@ uf2_load_result_t uf2_load_file(const char *name,
         st.total_blocks++;
         uint32_t off, len;
         uf2_class_t c = uf2_classify_block(&blk, EXPECTED_UF2_FAMILY,
-                                           APP_BASE_ADDR, APP_END_ADDR, XIP_BASE,
+                                           APP_BASE_ADDR, g_app_end_addr, XIP_BASE,
                                            &off, &len);
         switch (c) {
         case UF2_CLS_PROGRAM: {
@@ -82,8 +94,18 @@ uf2_load_result_t uf2_load_file(const char *name,
             st.programmed_blocks++;
             break;
         }
-        case UF2_CLS_SKIP:
         case UF2_CLS_OUT_OF_RANGE:
+            /* A block whose payload would land at or past the real flash end
+             * means the image is too big for this chip. Refuse rather than
+             * silently truncating. Blocks below APP_BASE_ADDR (e.g. a UF2 still
+             * linked to the bootloader region) stay as a soft skip. */
+            if (blk.target_addr >= APP_BASE_ADDR) {
+                storage_close();
+                return UF2_LOAD_TOO_LARGE;
+            }
+            st.skipped_blocks++;
+            break;
+        case UF2_CLS_SKIP:
             st.skipped_blocks++;
             break;
         case UF2_CLS_BAD_MAGIC:
@@ -122,7 +144,7 @@ uf2_load_result_t uf2_load_file(const char *name,
     while ((rc = read_block(&blk)) == 1) {
         uint32_t off, len;
         if (uf2_classify_block(&blk, EXPECTED_UF2_FAMILY,
-                               APP_BASE_ADDR, APP_END_ADDR, XIP_BASE,
+                               APP_BASE_ADDR, g_app_end_addr, XIP_BASE,
                                &off, &len) != UF2_CLS_PROGRAM)
             continue;
 
@@ -160,7 +182,7 @@ uf2_load_result_t uf2_validate_file(const char *name, uf2_load_stats_t *stats)
         st.total_blocks++;
         uint32_t off, len;
         uf2_class_t c = uf2_classify_block(&blk, EXPECTED_UF2_FAMILY,
-                                           APP_BASE_ADDR, APP_END_ADDR, XIP_BASE,
+                                           APP_BASE_ADDR, g_app_end_addr, XIP_BASE,
                                            &off, &len);
         switch (c) {
         case UF2_CLS_PROGRAM: {
@@ -172,8 +194,14 @@ uf2_load_result_t uf2_validate_file(const char *name, uf2_load_stats_t *stats)
             st.programmed_blocks++;
             break;
         }
-        case UF2_CLS_SKIP:
         case UF2_CLS_OUT_OF_RANGE:
+            if (blk.target_addr >= APP_BASE_ADDR) {
+                storage_close();
+                return UF2_LOAD_TOO_LARGE;
+            }
+            st.skipped_blocks++;
+            break;
+        case UF2_CLS_SKIP:
             st.skipped_blocks++;
             break;
         case UF2_CLS_BAD_MAGIC:

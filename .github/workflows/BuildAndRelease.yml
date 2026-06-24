@@ -1,0 +1,102 @@
+name: Build and create a release when tag is pushed
+
+# Only deploy when a new tag is pushed
+# git tag v0.n
+# git push origin v0.n
+on:
+    push:
+        tags:
+          - "v*.*-alpha"
+          - "v*.*.*"
+          - "v*.*"
+    workflow_dispatch:
+
+# Must match the project() name in CMakeLists.txt
+env:
+    APP_NAME: emuLoader
+
+# Allow this workflow to write back to the repository
+permissions:
+    contents: write
+
+jobs:
+    build-release:
+        runs-on: self-hosted
+        name: Build loader + emulators and create release
+        steps:
+
+          - name: Check out this repository with submodules
+            uses: actions/checkout@v6
+            with:
+                submodules: recursive
+
+          - name: Update line containing pico_set_program_version() in CMakeLists.txt with tag name
+            run: |
+                 input_string=${{ github.ref }}
+                 prefix="refs/tags/"
+                 if [[ $input_string == $prefix* ]]; then
+                      echo "The string starts with 'refs/tags/'."
+                      tag="${input_string#$prefix}"
+                      echo "Tag is ${tag}"
+                      sed -i "s/^[[:space:]]*pico_set_program_version(.*/pico_set_program_version(${{ env.APP_NAME }} \"$tag\")/" CMakeLists.txt
+                      sed -i "s/VX.X/$tag/" pico_shared/menu.h
+                 else
+                      echo "The string does not start with 'refs/tags/'."
+                 fi
+                 grep "pico_set_program_version" CMakeLists.txt
+                 grep SWVERSION pico_shared/menu.h
+
+          - name: Build emuLoader for every RP2350 hardware configuration
+            run: |
+                 chmod +x build*.sh bld.sh pico_shared/bld.sh
+                 export PICO_SDK_PATH=/datalocal/pico/pico-sdk
+                 export PICO_PIO_USB_PATH=/datalocal/Pico-PIO-USB
+                 ./buildAll.sh
+
+          - name: Clone and build the emulators (bootloader branch)
+            run: |
+                 export PICO_SDK_PATH=/datalocal/pico/pico-sdk
+                 export PICO_PIO_USB_PATH=/datalocal/Pico-PIO-USB
+                 rm -rf emu-build
+                 mkdir emu-build
+                 # prog_name from emulators.txt -> github repo name
+                 EMULATORS=(
+                     "piconesPlus=pico-infonesPlus"
+                     "picogenesisPlus=pico-genesisPlus"
+                     "picopcePlus=pico-pcePlus"
+                     "PicoPeanutGB=pico-peanutGB"
+                     "picosmsPlus=pico-smsplus"
+                 )
+                 for entry in "${EMULATORS[@]}"; do
+                     repo="${entry##*=}"
+                     echo "=============================="
+                     echo "Building $repo"
+                     echo "=============================="
+                     git clone --branch bootloader --recurse-submodules --depth 1 \
+                         "https://github.com/fhoedemakers/$repo.git" "emu-build/$repo"
+                     (
+                         cd "emu-build/$repo"
+                         chmod +x build*.sh bld.sh pico_shared/bld.sh
+                         ./buildAll.sh
+                     )
+                 done
+
+          - name: Assemble SD-card release zip
+            run: |
+                 chmod +x .github/scripts/pack_release.sh
+                 rm -rf release-zip
+                 mkdir release-zip
+                 ./.github/scripts/pack_release.sh release-zip emu-build .
+                 (cd release-zip && zip -r ../releases/pico_emuLoader_sdcard.zip emu)
+
+          - name: List release artifacts
+            run: |
+                 ls -l releases/
+
+          - name: Create release
+            uses: softprops/action-gh-release@v3
+            if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
+            with:
+              files: |
+                releases/emuLoader*.uf2
+                releases/pico_emuLoader_sdcard.zip

@@ -88,6 +88,10 @@ void DrawScreen(int selectedRow, int w = 0, int h = 0, uint16_t *imagebuffer = n
 // the linker a harmless definition.
 void splash() {}
 
+// Defined in pico_shared/FrensHelpers.cpp but not declared in FrensHelpers.h.
+// Reads the SPI flash JEDEC capacity byte; returns the chip size in bytes.
+namespace Frens { uint storage_get_flash_capacity(); }
+
 #define CPUFREQ_KHZ 252000
 
 #ifndef HW_CONFIG
@@ -473,6 +477,18 @@ int main()
         char fstype[16] = {0};
         Frens::getFsInfo(fstype, sizeof(fstype));
         LOG("Filesystem: %s", fstype);
+    }
+
+    // Clamp the loader's app-partition end to the real chip capacity. The
+    // build-time APP_END_ADDR assumes a 16 MB chip (Fruit Jam); on a smaller
+    // chip we'd otherwise let an over-large image march past real flash.
+    {
+        uint32_t cap = Frens::storage_get_flash_capacity();
+        uint32_t end = (cap >= FLASH_TOTAL_SIZE) ? APP_END_ADDR
+                                                  : (XIP_BASE + cap);
+        uf2_loader_set_app_end_addr(end);
+        LOG("Flash capacity (JEDEC): %u bytes  app-end clamp: 0x%08X",
+            (unsigned)cap, (unsigned)end);
     }
 
     screenBuffer = (charCell *)Frens::f_malloc(screenbufferSize);

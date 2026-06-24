@@ -15,6 +15,7 @@ typedef enum {
     UF2_LOAD_READ_ERROR,
     UF2_LOAD_BAD_FILE,           /* misaligned size / corrupt blocks            */
     UF2_LOAD_VERIFY_FAILED,
+    UF2_LOAD_TOO_LARGE,          /* image extends past the chip's real flash     */
 } uf2_load_result_t;
 
 typedef struct {
@@ -55,5 +56,14 @@ uf2_load_result_t uf2_load_file(const char *name,
 uf2_load_result_t uf2_validate_file(const char *name, uf2_load_stats_t *stats);
 
 const char *uf2_load_result_str(uf2_load_result_t r);
+
+/*
+ * Set the upper bound (absolute, exclusive) the loader will accept for any
+ * UF2 block. Defaults to the build-time APP_END_ADDR (which assumes a 16 MB
+ * chip). Call this once at startup with min(APP_END_ADDR, XIP_BASE + real
+ * flash capacity) so that on a smaller chip we refuse a too-large image
+ * instead of silently truncating the tail.
+ */
+void uf2_loader_set_app_end_addr(uint32_t app_end_addr);
 
 #endif /* UF2_LOADER_H */
