@@ -359,6 +359,7 @@ void launchInFlash()
 #endif
     multicore_reset_core1();   // bootloader's HSTX driver lives on core1; quiesce
     stdio_flush();
+    Frens::markLaunchedFromBootloader();
     app_launch_run();          // VTOR jump; no return on success
     LOG("app_launch_run() returned unexpectedly.");
 }
@@ -412,6 +413,7 @@ void flashAndLaunch(int idx)
             wiipad_end();              // free I2C for the emulator's own init
 #endif
             multicore_reset_core1();   // hand HSTX over; emulator brings its own driver up
+            Frens::markLaunchedFromBootloader();
             app_launch_run();          // no return on success
             LOG("app_launch_run() returned unexpectedly.");
         } else {
@@ -454,11 +456,20 @@ int main()
     logAppPartitionState("at boot");
 
     // --- RESUME CHECK -------------------------------------------------------
-    if (watchdog_enable_caused_reboot() && app_launch_present()) {
+    // If the previously-running emulator asked to return to the picker
+    // (Frens::rebootToBootloader() before its watchdog_reboot), honour that
+    // request and fall through to the menu even though watchdog_enable
+    // would otherwise trigger the resume jump.
+    bool returnRequested = Frens::consumeReturnToBootloaderRequest();
+    if (returnRequested) {
+        LOG("Return-to-loader requested by app; skipping resume jump.");
+    }
+    if (!returnRequested && watchdog_enable_caused_reboot() && app_launch_present()) {
         LOG("Resume path: watchdog_enable=true and app image valid");
         LOG("Jumping to app reset vector at 0x%08X (no return on success)",
             (unsigned)((const uint32_t *)APP_BASE_ADDR)[1]);
         stdio_flush();
+        Frens::markLaunchedFromBootloader();
         app_launch_run();
         LOG("Resume refused (no valid image); falling through to menu.");
     } else {
