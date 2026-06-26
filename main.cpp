@@ -57,6 +57,7 @@ extern "C" {
 #include "program_name.h"
 #include "emulators_txt.h"
 #include "gui.h"
+#include "screensaver.h"
 #include "progress_bar.h"
 #include <hardware/divider.h>
 }
@@ -552,6 +553,15 @@ int main()
     int  slide_p        = 0;        // 0..SCREENWIDTH, pixels of the new image visible
     int  slide_dir      = 0;        // +1 = new enters from right, -1 = from left, 0 = idle
 
+    // Screensaver state. Activates after 30 s of no input; loads up to 5
+    // small bouncing images from /emu/assets/screensaver/ and exits on any
+    // button press. `ss_unavailable` latches when the first init attempt
+    // finds nothing usable so we don't keep retrying every frame.
+    constexpr uint32_t SS_IDLE_THRESHOLD = 5 * 60;   // 30 s @ 60 fps
+    uint32_t idle_frames    = 0;
+    bool     ss_active      = false;
+    bool     ss_unavailable = false;
+
     // Single loader that picks the full-res or half-res variant based on the
     // target buffer's size. Used for both cur (always full) and next (half
     // when no PSRAM, full otherwise).
@@ -654,6 +664,34 @@ int main()
 #endif
         uint32_t pushed = btns & ~prevButtons;
         prevButtons = btns;
+
+        // Idle counter feeds the screensaver. Tick only while no button is
+        // pressed -- a held button is not "idle".
+        if (btns) idle_frames = 0;
+        else      idle_frames++;
+
+        if (ss_active) {
+            if (btns) {
+                // Any press exits. The press itself must NOT also drive
+                // navigation, A-launch, or SELECT-mode-toggle this frame --
+                // the user just meant "wake up". Setting prevButtons = ~0u
+                // prevents *future* frames from seeing this press as a fresh
+                // edge, and the `continue` below stops this frame's already-
+                // computed `pushed` (which still contains the wake button)
+                // from reaching the rest of the loop.
+                screensaver_free();
+                ss_active   = false;
+                idle_frames = 0;
+                prevButtons = ~0u;
+                continue;
+            } else {
+                screensaver_run_one_frame();
+                continue;   // skip nav + normal render while running
+            }
+        } else if (!ss_unavailable && idle_frames >= SS_IDLE_THRESHOLD) {
+            if (screensaver_init()) ss_active = true;
+            else                    ss_unavailable = true;
+        }
 
         // SELECT: toggle modes regardless. Persist so next boot lands the same way.
         if (pushed & Btn::SELECT) {

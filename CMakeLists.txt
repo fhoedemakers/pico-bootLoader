@@ -78,6 +78,7 @@ add_executable(${projectname}
     src/program_name.c
     src/emulators_txt.c
     src/gui.cpp
+    src/screensaver.cpp
     src/progress_bar.cpp
 )
 
