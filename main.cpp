@@ -971,17 +971,21 @@ int main()
         // io::GamePadState::Button bits the rest of this loop checks via Btn::*.
 #if NES_PIN_CLK != -1 || NES_PIN_CLK_1 != -1
         auto nesToBtn = [](uint8_t s) -> uint32_t {
-            // NES wire order: 0x01=Right, 0x02=Left, 0x04=Down, 0x08=Up,
-            //                 0x10=Start, 0x20=Select, 0x40=B, 0x80=A.
+            // nespad_states is LSB-first wire order (A clocked out first lands
+            // in bit 0): 0x01=A, 0x02=B, 0x04=Select, 0x08=Start, 0x10=Up,
+            // 0x20=Down, 0x40=Left, 0x80=Right. The header comment in
+            // pico_shared/nespad.cpp claims the reverse and is wrong --
+            // infonesPlus ORs nespad_states[] straight into a bitmask with
+            // A=1<<0..RIGHT=1<<7, which only works under this layout.
             uint32_t b = 0;
-            if (s & 0x01) b |= Btn::RIGHT;
-            if (s & 0x02) b |= Btn::LEFT;
-            if (s & 0x04) b |= Btn::DOWN;
-            if (s & 0x08) b |= Btn::UP;
-            if (s & 0x10) b |= Btn::START;
-            if (s & 0x20) b |= Btn::SELECT;
-            if (s & 0x40) b |= Btn::B;
-            if (s & 0x80) b |= Btn::A;
+            if (s & 0x01) b |= Btn::A;
+            if (s & 0x02) b |= Btn::B;
+            if (s & 0x04) b |= Btn::SELECT;
+            if (s & 0x08) b |= Btn::START;
+            if (s & 0x10) b |= Btn::UP;
+            if (s & 0x20) b |= Btn::DOWN;
+            if (s & 0x40) b |= Btn::LEFT;
+            if (s & 0x80) b |= Btn::RIGHT;
             return b;
         };
 #endif
