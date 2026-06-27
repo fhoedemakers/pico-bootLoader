@@ -557,7 +557,7 @@ int main()
     // small bouncing images from /emu/assets/screensaver/ and exits on any
     // button press. `ss_unavailable` latches when the first init attempt
     // finds nothing usable so we don't keep retrying every frame.
-    constexpr uint32_t SS_IDLE_THRESHOLD = 5 * 60;   // 30 s @ 60 fps
+    constexpr uint32_t SS_IDLE_THRESHOLD = 30 * 60;   // 30 s @ 60 fps
     uint32_t idle_frames    = 0;
     bool     ss_active      = false;
     bool     ss_unavailable = false;
