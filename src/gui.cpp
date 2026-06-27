@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "FrensFonts.h"
 #include "FrensHelpers.h"
 #include "ff.h"
 
@@ -10,12 +11,28 @@ namespace {
     uint16_t *s_buf_cur          = nullptr;
     uint16_t *s_buf_next         = nullptr;
     bool      s_next_is_half_res = false;   // true on SRAM-only configs
+    const char *s_footer         = nullptr; // one-line button-hint overlay
 }
 
 // Half-resolution dimensions for the slide-only buffer used when there is
 // no PSRAM. 160x120 = 38,400 bytes, 4x smaller than the full image.
 #define GUI_HALF_W (SCREENWIDTH  / 2)
 #define GUI_HALF_H (SCREENHEIGHT / 2)
+
+// Footer band: one 8-pixel character row at the very bottom of the screen.
+#define GUI_FOOTER_H   FONT_CHAR_HEIGHT                  // 8
+#define GUI_FOOTER_Y0  (SCREENHEIGHT - GUI_FOOTER_H)     // 232
+
+// Backend-specific 16-bit pixel encodings for the footer band -- same
+// per-backend split main.cpp uses for the error overlay (RGB555 on HSTX,
+// RGB444 packed 0x0RGB on PicoDVI).
+#if HSTX
+#define GUI_FOOTER_FG  0x7FFFu
+#define GUI_FOOTER_BG  0x0000u
+#else
+#define GUI_FOOTER_FG  0x0FFFu
+#define GUI_FOOTER_BG  0x0000u
+#endif
 
 extern "C" {
 
@@ -45,6 +62,8 @@ void gui_save_mode(const char *path, bool graphical)
     f_write(&fil, &c, 1, &bw);
     f_close(&fil);
 }
+
+void gui_set_footer(const char *text) { s_footer = text; }
 
 bool gui_buffers_alloc(void)
 {
@@ -221,6 +240,37 @@ static inline void copy_b_half(uint16_t *dst, const uint16_t *brow_half,
     }
 }
 
+// Paint one scanline of the footer band on top of whatever compose_row()
+// just wrote into dst. y is in [GUI_FOOTER_Y0, SCREENHEIGHT). Fills the
+// whole row with bg so the band is opaque, then overlays glyph pixels from
+// the shared 8x8 font (same pattern as menu.cpp's charcell pipeline).
+static void overlay_footer_row(uint16_t *dst, int y, const char *text)
+{
+    const uint16_t fg = GUI_FOOTER_FG;
+    const uint16_t bg = GUI_FOOTER_BG;
+
+    for (int x = 0; x < SCREENWIDTH; x++) dst[x] = bg;
+
+    const int len      = (int)strlen(text);
+    const int text_w   = len * FONT_CHAR_WIDTH;
+    const int x_start  = (SCREENWIDTH - text_w) / 2;
+    const int row_in_g = y - GUI_FOOTER_Y0;   // 0..7 within the glyph
+
+    if (x_start < 0 || text_w > SCREENWIDTH) return;   // string too wide
+
+    for (int i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (c < FONT_FIRST_ASCII || c >= FONT_FIRST_ASCII + FONT_N_CHARS)
+            c = '?';
+        char slice = getcharslicefrom8x8font((char)c, row_in_g);
+        uint16_t *out = dst + x_start + i * FONT_CHAR_WIDTH;
+        for (int bit = 0; bit < 8; bit++) {
+            out[bit] = (slice & 1) ? fg : bg;
+            slice >>= 1;
+        }
+    }
+}
+
 // Per-scanline composition. `a` is always full 320x240. `b` may be NULL,
 // 320x240 (b_half_res=false), or 160x120 (b_half_res=true).
 static inline void compose_row(uint16_t *dst, int y,
@@ -283,6 +333,12 @@ void gui_draw_frame(const uint16_t *a, const uint16_t *b,
 #endif
 
         compose_row(dst, y, a, b, slide_px, direction, b_half_res);
+
+        // Footer band: composed into dst before the line-stream push so
+        // every backend (HSTX FB, PicoDVI FB, PicoDVI line-stream) gets it.
+        if (s_footer && *s_footer && y >= GUI_FOOTER_Y0) {
+            overlay_footer_row(dst, y, s_footer);
+        }
 
 #if !HSTX
 #if FRAMEBUFFERISPOSSIBLE

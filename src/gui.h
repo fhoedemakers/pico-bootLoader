@@ -8,8 +8,12 @@
  * the active display backend (PicoDVI line-stream / PicoDVI framebuffer / HSTX
  * framebuffer) is using.
  *
- * Pure image: nothing else is drawn on the screen in graphical mode. Text
- * overlay (display name, in-flash marker, etc.) is intentionally absent.
+ * The artwork is otherwise un-decorated -- display name, in-flash marker,
+ * etc. are intentionally absent so the picture fills the screen. The only
+ * overlay drawn on top is a single 8-pixel button-hint footer at the very
+ * bottom, set via gui_set_footer() and composed into each affected scanline
+ * inside gui_draw_frame() so it renders uniformly across all backends
+ * (including PicoDVI line-stream, which has no persistent framebuffer).
  *
  * Mode persistence: a one-byte file ('0' / '1') on the SD card remembers
  * whether the user last left the menu in text or graphical mode.
@@ -83,6 +87,12 @@ void gui_fill_solid_half_res(uint16_t *dest_160x120, uint16_t color);
  */
 void gui_draw_frame(const uint16_t *a, const uint16_t *b,
                     int slide_px, int direction, bool b_half_res);
+
+/* Set the one-line button-hint footer drawn at the bottom of every
+ * graphical frame. Pass NULL or "" to hide the band. The caller-owned
+ * string must remain valid until the next call -- gui only caches the
+ * pointer. */
+void gui_set_footer(const char *text);
 
 #ifdef __cplusplus
 }

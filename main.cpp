@@ -1111,6 +1111,16 @@ int main()
 
         // Render.
         if (graphical_mode && buffers_ready) {
+            // Rebuilt every frame so the A-button label tracks pad hot-plug
+            // (NES "A", XInput "B", DualShock "O", ...). gui only caches
+            // the pointer so the stack buffer must live across the call,
+            // which it does -- we set it immediately before gui_draw_frame.
+            char bl1[2], bl2[2];
+            getButtonLabels(bl1, bl2);
+            char footer[SCREEN_COLS + 1];
+            snprintf(footer, sizeof(footer),
+                     "LEFT/RIGHT:choose  %s:start  SELECT:text", bl1);
+            gui_set_footer(footer);
             gui_draw_frame(gui_buf_cur(),
                            slide_dir != 0 ? gui_buf_next() : nullptr,
                            slide_p, slide_dir,
