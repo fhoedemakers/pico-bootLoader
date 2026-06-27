@@ -108,6 +108,12 @@ namespace Frens { uint storage_get_flash_capacity(); }
 // don't need a long read-time -- just enough to acknowledge the press.
 #define FLASH_NOTICE_MS  500
 
+// On picoDVI we have to stop core1 before flashing (see flashAndLaunch
+// comment), so the screen goes dark for the whole flash op. Hold the
+// "screen will go blank" notice on screen long enough for the user to
+// actually read it.
+#define PICO_DVI_FLASH_NOTICE_MS  3500
+
 #define LOG(fmt, ...) printf("[emuLoader] " fmt "\n", ##__VA_ARGS__)
 
 namespace {
@@ -459,6 +465,15 @@ void logAppPartitionState(const char *when)
 // have to worry about XIP state. No printf/LOG inside -- bookend logging
 // happens in flashAndLaunch around uf2_load_file. The throttle (done & 0x3F)
 // keeps redraw cost down for large images (otherwise ~16 K calls).
+//
+// LED heartbeat: on picoDVI HW configs the DVI receiver loses sync during the
+// ~50 ms-per-sector erase windows even with the full SRAM audit -- HSTX's
+// HW-accelerated IRQ is microseconds, picoDVI's PIO encoder isn't. The
+// progress bar is invisible while the screen is dark, so toggle the onboard
+// LED here too: it's a direct gpio_put on core0 between flash calls (XIP is
+// restored at each callback boundary), and gives the user some "still alive"
+// feedback during the dark stretch. On HSTX configs the screen also stays up
+// so the LED is just bonus.
 extern "C" void __not_in_flash_func(flashProgress)(int phase, uint32_t done, uint32_t total)
 {
     // Combined percentage: erase contributes 0..10, write contributes 10..100.
@@ -474,6 +489,12 @@ extern "C" void __not_in_flash_func(flashProgress)(int phase, uint32_t done, uin
         if (!boundary && (done & 0x3F) != 0) return;
     }
     progress_bar_draw(pct, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
+
+    // LED heartbeat -- toggle on every accepted callback so the user sees
+    // activity even while the picoDVI signal is gone.
+    static bool led_on = false;
+    led_on = !led_on;
+    Frens::blinkLed(led_on);
 }
 
 // Read the SD directory, parse each emulator's program_name from its binary_info,
@@ -647,10 +668,11 @@ void flashAndLaunch(int idx)
         return;
     }
 
-    // Show the notice. Unlike before, core1 keeps running through the flash
-    // op so the bar below this text updates in real time -- see
-    // framework-flash-while-running.md for the SRAM-residence audit that
-    // makes this safe.
+#if HSTX
+    // HSTX path: hardware-accelerated TMDS encoding gives microsecond IRQs
+    // on core1, so it keeps running cleanly through every flash erase/write
+    // window. The live progress bar updates in real time and the audit in
+    // framework-flash-while-running.md keeps core1 SRAM-only throughout.
     showMessage("Flashing", g_emus[idx].label, "Do not power off.");
     DrawScreen(-1);
     idleFor(FLASH_NOTICE_MS);
@@ -661,11 +683,29 @@ void flashAndLaunch(int idx)
     progress_bar_draw(0, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
 
     LOG("Pre-flight OK. core1 left running; beginning flash sequence.");
+#else
+    // picoDVI path: software TMDS encoding on core1 (PIO encoder) is too
+    // timing-sensitive to survive multi-second flash ops -- the DVI
+    // receiver drops sync inside the first sector erase even with a full
+    // SRAM audit of core1. Stop core1 entirely before flashing so it can't
+    // hardfault on anything; the screen goes intentionally dark and the
+    // LED heartbeat in flashProgress() carries progress for the user.
+    showMessage("Screen will go blank.",
+                "Watch LED for progress.",
+                "Be patient...");
+    DrawScreen(-1);
+    idleFor(PICO_DVI_FLASH_NOTICE_MS);
+
+    LOG("Pre-flight OK. picoDVI: stopping core1 before flash sequence.");
+    multicore_reset_core1();
+#endif
 
     uf2_load_result_t r = uf2_load_file(full, &st, flashProgress);
     if (r == UF2_LOAD_OK) {
+#if HSTX
         // Force a final 100% paint before we tear down core1.
         progress_bar_draw(100, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
+#endif
         LOG("Flash OK: %u blocks written to 0x%08X..0x%08X",
             (unsigned)st.programmed_blocks,
             (unsigned)st.lowest_addr, (unsigned)st.highest_addr);
@@ -676,7 +716,11 @@ void flashAndLaunch(int idx)
 #if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
             wiipad_end();              // free I2C for the emulator's own init
 #endif
+#if HSTX
             multicore_reset_core1();   // hand HSTX over; emulator brings its own driver up
+#endif
+            // picoDVI: core1 was already reset above the flash sequence, no
+            // need to reset again.
             Frens::markLaunchedFromBootloader();
             app_launch_run();          // no return on success
             LOG("app_launch_run() returned unexpectedly.");
@@ -752,7 +796,14 @@ int main()
     // out of scope -- FRAMEBUFFERISPOSSIBLE is false there and the flag
     // is ignored at the !HSTX && FRAMEBUFFERISPOSSIBLE gate in
     // FrensHelpers.cpp:1639.
-    bool sdOk = Frens::initAll(dummyRom, CPUFREQ_KHZ, 0, 0, 256, false, true);
+    //
+    // audiobufferSize=1024 (not 256): in PicoDVI framebuffer mode the
+    // emulators all use 1024; pico-infonesPlus main.cpp explicitly notes
+    // "When using framebuffer, AUDIOBUFFERSIZE must be increased to 1024".
+    // 256 caused an intermittent startup deadlock on HW_CONFIG=1 where
+    // core1 hung in the DMA IRQ's waitForLastBlockTransferToStart and
+    // core0 hung in PaceFrames60fps waiting for vsync.
+    bool sdOk = Frens::initAll(dummyRom, CPUFREQ_KHZ, 0, 0, 1024, false, true);
     LOG("initAll done. SD mounted=%d  PSRAM=%d  framebufferUsed=%d",
         (int)sdOk, (int)Frens::isPsramEnabled(), (int)Frens::isFrameBufferUsed());
 
