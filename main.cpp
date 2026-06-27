@@ -56,6 +56,7 @@ extern "C" {
 #include "storage.h"
 #include "program_name.h"
 #include "emulators_txt.h"
+#include "uf2_crc.h"
 #include "gui.h"
 #include "screensaver.h"
 #include "progress_bar.h"
@@ -125,9 +126,15 @@ struct SdEmu {
 
 char  g_emuDir[32];                   // "/emu/8"
 SdEmu g_emus[32];
-int   g_emu_count = 0;
+int   g_emu_count = 0;                // entries actually shown (matched in emulators.txt)
+int   g_emu_seen  = 0;                // total .uf2 files found in g_emuDir, pre-filter
 char  g_flash_prog_name[PROG_NAME_MAX] = {0};   // currently-flashed image's program name
 int   g_flash_idx = -1;                         // index into g_emus, or -1 if none matches
+// True when the in-flash image has the same program_name as g_emus[g_flash_idx]
+// but its CRC32 differs from the SD .uf2 -- meaning the user dropped a newer
+// build onto the card. Pressing A on that entry takes the flash path instead
+// of the in-flash launch.
+bool  g_flash_drift = false;
 
 // User-visible mode toggle (SELECT). Persisted to /emu/.guimode across reboots.
 #define EMULATORS_TXT_PATH "/emu/emulators.txt"
@@ -189,11 +196,14 @@ void drawMenu(int sel, int top, int visible)
         const char *name = g_emus[idx].display_name[0] ?
                            g_emus[idx].display_name : g_emus[idx].label;
         char line[SCREEN_COLS + 1];
-        // Two prefix characters: selection marker, then flashed marker.
-        // ">" = cursor; "*" = currently in flash. Either or both, or neither.
+        // Two prefix characters: selection marker, then flash-state marker.
+        // ">" = cursor; "*" = currently in flash and matches SD;
+        // "!" = currently in flash but SD copy differs (will reflash on launch).
+        char flashMark = ' ';
+        if (flashed) flashMark = g_flash_drift ? '!' : '*';
         snprintf(line, sizeof(line), "%c %c %s",
                  seld ? '>' : ' ',
-                 flashed ? '*' : ' ',
+                 flashMark,
                  name);
         putText(1, row, line, fg, bg);
     }
@@ -205,8 +215,8 @@ void drawMenu(int sel, int top, int visible)
     getButtonLabels(buttonLabel1, buttonLabel2);
 
     char hint[SCREEN_COLS + 1];
-    snprintf(hint, sizeof(hint), "*  = in flash (no flash on %s)", buttonLabel1);
-    centerText(SCREEN_ROWS - 4, hint, COL_FG, COL_BG);
+    centerText(SCREEN_ROWS - 4, "* in flash    ! SD differs (reflash)",
+               COL_FG, COL_BG);
     centerText(SCREEN_ROWS - 3, "UP / DOWN : choose   SELECT : graphical", COL_FG, COL_BG);
     snprintf(hint, sizeof(hint), "%s : start", buttonLabel1);
     centerText(SCREEN_ROWS - 2, hint, COL_FG, COL_BG);
@@ -218,6 +228,200 @@ void showMessage(const char *l1, const char *l2, const char *l3)
     if (l1) centerText(12, l1, COL_FG, COL_BG);
     if (l2) centerText(14, l2, COL_FG, COL_BG);
     if (l3) centerText(16, l3, COL_FG, COL_BG);
+}
+
+// --- Graphical error-screen rendering --------------------------------------
+//
+// The error screen is composed in two layers per frame:
+//   1. Charcell layer (via DrawScreen): title in a red bar, message body in an
+//      ASCII-bordered box, "Press RESET" line. Carries all the words.
+//   2. Direct-framebuffer overlay (overlayErrorDecor below): diagonal yellow/
+//      black caution-tape bands top + bottom, a big yellow disk with a red
+//      "!" punched through the top stripe band. Pure pixel writes -- nothing
+//      goes through the charcell pipeline. Drawn AFTER DrawScreen so it sits
+//      on top of (and overwrites) any charcell content in those bands.
+//
+// Both layers are repainted every frame in the fatalErrorScreen pump loop, so
+// nothing has to persist between frames.
+
+// NesMenuPalette indices used by the charcell layer. 0x16 / 0x06 are NES reds,
+// 0x30 is white. Picked to match the bright FB-direct red so the layers don't
+// clash visually.
+#define COL_ERR_BG  0x06
+#define COL_ERR_FG  0x30
+
+// 16-bit pixel colours for the FB-direct overlay. Two encodings depending on
+// the active backend -- the same split progress_bar.cpp uses.
+//   HSTX  : RGB555  (bit layout 0RRRRR GGGGG BBBBB)
+//   !HSTX : RGB444  packed as 0x0RGB (this codebase's PicoDVI encoding)
+#if HSTX
+#define ERRPX_YELLOW  0x7FE0u
+#define ERRPX_BLACK   0x0000u
+#define ERRPX_RED     0x7C00u
+#else
+#define ERRPX_YELLOW  0x0FF0u
+#define ERRPX_BLACK   0x0000u
+#define ERRPX_RED     0x0F00u
+#endif
+
+// Get the active backend's 320x240 framebuffer. Returns nullptr when there
+// isn't one (PicoDVI line-stream mode without a framebuffer) -- the caller
+// silently skips overlay in that case and the user still gets the charcell
+// layer alone.
+static uint16_t *getActiveFramebuffer()
+{
+#if HSTX
+    return (uint16_t *)hstx_getframebuffer();
+#else
+  #if FRAMEBUFFERISPOSSIBLE
+    if (!Frens::isFrameBufferUsed()) return nullptr;
+    return Frens::framebuffer;
+  #else
+    return nullptr;
+  #endif
+#endif
+}
+
+// Caution-tape stripe band: diagonal yellow/black stripes filling a horizontal
+// strip [y0, y0+h). Stripe width fixed at 12 px which gives a clear "caution"
+// look without going dizzy.
+static void drawStripeBand(uint16_t *fb, int y0, int h)
+{
+    const int W = 320;
+    for (int dy = 0; dy < h; dy++) {
+        int y = y0 + dy;
+        uint16_t *row = fb + y * W;
+        for (int x = 0; x < W; x++) {
+            row[x] = (((x + y) / 12) & 1) ? ERRPX_YELLOW : ERRPX_BLACK;
+        }
+    }
+}
+
+// Big yellow "!" disk centered horizontally at x=cx, vertically at y=cy.
+// Sits half-embedded in the top stripe band so the icon visually breaks
+// through it -- the whole point of having it there.
+static void drawWarningDisk(uint16_t *fb, int cx, int cy, int r)
+{
+    const int W = 320;
+    const int rSq        = r * r;
+    const int rSqInner   = (r - 3) * (r - 3);
+    // Yellow disk (with black outline ring carved out of the same loop).
+    for (int y = cy - r; y <= cy + r; y++) {
+        if (y < 0 || y >= 240) continue;
+        for (int x = cx - r; x <= cx + r; x++) {
+            int dx = x - cx, dy = y - cy;
+            int d  = dx * dx + dy * dy;
+            if (d > rSq) continue;
+            fb[y * W + x] = (d >= rSqInner) ? ERRPX_BLACK : ERRPX_YELLOW;
+        }
+    }
+    // Red "!" inside: a 5-px-wide bar above a 5x5 dot below.
+    auto fillRect = [&](int x0, int y0, int x1, int y1, uint16_t col) {
+        for (int y = y0; y <= y1; y++) {
+            if (y < 0 || y >= 240) continue;
+            for (int x = x0; x <= x1; x++) {
+                if (x < 0 || x >= W) continue;
+                fb[y * W + x] = col;
+            }
+        }
+    };
+    fillRect(cx - 2, cy - 14, cx + 2, cy + 4,  ERRPX_RED);  // tall bar
+    fillRect(cx - 2, cy + 8,  cx + 2, cy + 13, ERRPX_RED);  // dot
+}
+
+// Direct-framebuffer overlay. Called after DrawScreen() each frame so it
+// stays on top of the charcell pipeline.
+static void overlayErrorDecor()
+{
+    uint16_t *fb = getActiveFramebuffer();
+    if (!fb) return;
+
+    drawStripeBand(fb, 0,   16);     // top caution-tape band
+    drawStripeBand(fb, 224, 16);     // bottom caution-tape band
+    drawWarningDisk(fb, 160, 16, 22);  // breaks through the top band
+}
+
+// Charcell layout. Avoids rows 0..1 and 28..29 since those get overwritten
+// by the stripe overlay. Title and "Press RESET" use the same red bg as the
+// FB-direct red so the layers blend rather than clash.
+void drawErrorScreen(const char *title, const char *l1, const char *l2, const char *l3)
+{
+    ClearScreen(COL_BG);
+
+    // putText() collapses consecutive whitespace -- a 40-space string ends up
+    // writing only one cell, leaving the rest of the row untouched. Use '_'
+    // so each cell is treated as a non-space character; putText converts it
+    // back to a literal space at write time (menu.cpp:596), giving us a
+    // proper solid-bg row with no visible characters.
+    char bar[SCREEN_COLS + 1];
+    memset(bar, '_', SCREEN_COLS);
+    bar[SCREEN_COLS] = '\0';
+
+    // Title bar: solid red row with white centered title. Sits below the
+    // bottom edge of the warning disk (which lands around scanline 38 ~= row 4).
+    putText(0, 5, bar, COL_ERR_FG, COL_ERR_BG);
+    if (title) centerText(5, title, COL_ERR_FG, COL_ERR_BG);
+
+    // ASCII box around the three message lines (rows 10..14).
+    const int boxW = 36;
+    const int boxX = (SCREEN_COLS - boxW) / 2;
+    char border[SCREEN_COLS + 1];
+    border[0] = '+';
+    for (int i = 1; i < boxW - 1; i++) border[i] = '-';
+    border[boxW - 1] = '+';
+    border[boxW] = '\0';
+
+    putText(boxX, 10, border, COL_FG, COL_BG);
+    for (int r = 11; r <= 13; r++) {
+        putText(boxX,            r, "|", COL_FG, COL_BG);
+        putText(boxX + boxW - 1, r, "|", COL_FG, COL_BG);
+    }
+    putText(boxX, 14, border, COL_FG, COL_BG);
+
+    const char *lines[3] = { l1, l2, l3 };
+    for (int i = 0; i < 3; i++) {
+        if (lines[i]) centerText(11 + i, lines[i], COL_FG, COL_BG);
+    }
+
+    // "Press RESET" bar: another solid red row above the bottom stripe band.
+    putText(0, 21, bar, COL_ERR_FG, COL_ERR_BG);
+    centerText(21, "Press RESET to retry", COL_ERR_FG, COL_ERR_BG);
+}
+
+// Render the error screen and never return.
+//
+// The screen is entirely static (no animation, no input), so on backends with
+// a persistent framebuffer (HSTX, PicoDVI in framebuffer mode) we paint once
+// and then just pump USB. Redrawing every frame causes visible flicker: the
+// stripe rows go briefly blank between DrawScreen (which writes charcell bg
+// to those rows) and overlayErrorDecor (which paints stripes on top), and
+// the DMA scanout catches that gap.
+//
+// PicoDVI in line-stream mode has no framebuffer; every scanline is rebuilt
+// from screenBuffer on the fly, so DrawScreen must run every frame. The
+// overlay does nothing there (no framebuffer to write to) -- but DrawScreen
+// alone never tears because the line pipeline is single-pass.
+[[noreturn]] void fatalErrorScreen(const char *title,
+                                   const char *l1, const char *l2, const char *l3)
+{
+    LOG("FATAL: %s", title ? title : "(no title)");
+    if (l1) LOG("       %s", l1);
+    if (l2) LOG("       %s", l2);
+    if (l3) LOG("       %s", l3);
+    drawErrorScreen(title, l1, l2, l3);
+
+    bool persistentFB = (getActiveFramebuffer() != nullptr);
+
+    // One-shot paint. DrawScreen pushes the charcell layer into the FB (or
+    // the line pipeline on line-stream); overlay then sits on top on FB-mode.
+    DrawScreen(-1);
+    if (persistentFB) overlayErrorDecor();
+
+    for (;;) {
+        tuh_task();
+        if (!persistentFB) DrawScreen(-1);  // line-stream needs every frame
+        sleep_ms(16);
+    }
 }
 
 // Pump USB + render for a fixed time (display stays live).
@@ -274,55 +478,86 @@ extern "C" void __not_in_flash_func(flashProgress)(int phase, uint32_t done, uin
 
 // Read the SD directory, parse each emulator's program_name from its binary_info,
 // build g_emus[], and locate the in-flash entry (g_flash_idx).
+//
+// Filtering: an .uf2 file is added to g_emus[] only if its program_name has a
+// matching row in /emu/emulators.txt. Files that aren't listed (third-party
+// builds, test images, .uf2 files for unrelated tools) are silently skipped --
+// the picker should show only emulators that the maintainer of this card has
+// curated as launchable.
 void scanEmulators()
 {
-    Frens::RomLister lister(32 * 1024, ".uf2");
-    lister.list(g_emuDir);
-    int count = (int)lister.Count();
-    auto *entries = lister.GetEntries();
-
-    int cap = (int)(sizeof(g_emus) / sizeof(g_emus[0]));
-    if (count > cap) {
-        LOG("WARNING: %d entries found, capping list at %d", count, cap);
-        count = cap;
-    }
-
     g_emu_count = 0;
-    for (int i = 0; i < count; i++) {
-        SdEmu &e = g_emus[g_emu_count];
-        strncpy(e.filename, entries[i].Path, sizeof(e.filename) - 1);
-        e.filename[sizeof(e.filename) - 1] = '\0';
+    g_emu_seen  = 0;
 
-        char full[FF_MAX_LFN];
-        snprintf(full, sizeof(full), "%s/%s", g_emuDir, e.filename);
+    // f_stat first: RomLister::list() silently falls back to chdir("/") when
+    // its target directory doesn't exist (RomLister.cpp:118) and then lists
+    // the root, which would show whatever the user has at the top of the SD
+    // (e.g. 10 unrelated .uf2 files) as if they were emulators for this
+    // config. Skip the lister entirely when the config dir is missing so
+    // the post-scan path lands on the right "nothing here" error.
+    FILINFO fi;
+    FRESULT fr = f_stat(g_emuDir, &fi);
+    bool dir_ok = (fr == FR_OK) && (fi.fattrib & AM_DIR);
+    if (!dir_ok) {
+        LOG("Config dir %s not present (f_stat=%d, attr=0x%02x); leaving emu list empty.",
+            g_emuDir, (int)fr, (unsigned)fi.fattrib);
+    } else {
+        Frens::RomLister lister(32 * 1024, ".uf2");
+        lister.list(g_emuDir);
+        int count = (int)lister.Count();
+        auto *entries = lister.GetEntries();
 
-        e.prog_name[0]    = '\0';
-        e.image_key[0]    = '\0';
-        e.display_name[0] = '\0';
-        bool ok = program_name_from_uf2_file(full, e.prog_name, sizeof(e.prog_name));
-        if (ok && e.prog_name[0]) {
+        int cap = (int)(sizeof(g_emus) / sizeof(g_emus[0]));
+        if (count > cap) {
+            LOG("WARNING: %d entries found, capping list at %d", count, cap);
+            count = cap;
+        }
+
+        g_emu_seen  = count;
+        int skipped = 0;
+        for (int i = 0; i < count; i++) {
+            SdEmu &e = g_emus[g_emu_count];
+            strncpy(e.filename, entries[i].Path, sizeof(e.filename) - 1);
+            e.filename[sizeof(e.filename) - 1] = '\0';
+
+            char full[FF_MAX_LFN];
+            snprintf(full, sizeof(full), "%s/%s", g_emuDir, e.filename);
+
+            e.prog_name[0]    = '\0';
+            e.image_key[0]    = '\0';
+            e.display_name[0] = '\0';
+            bool ok = program_name_from_uf2_file(full, e.prog_name, sizeof(e.prog_name));
+            if (!ok || !e.prog_name[0]) {
+                LOG("  SKIP %s (binary_info parse failed; no program_name)", e.filename);
+                skipped++;
+                continue;
+            }
             strncpy(e.label, e.prog_name, sizeof(e.label) - 1);
             e.label[sizeof(e.label) - 1] = '\0';
-        } else {
-            makeLabelFromFilename(e.filename, e.label, sizeof(e.label));
-            LOG("  binary_info parse FAILED for %s; fallback label=\"%s\"",
-                e.filename, e.label);
+
+            // The emulators.txt match is mandatory: an unlisted .uf2 is not
+            // shown. This is how Frank curates which emulators are "supported"
+            // on this card -- the bootloader trusts the txt as the allow-list.
+            bool matched = emulators_txt_lookup(e.prog_name,
+                                                e.image_key,    sizeof(e.image_key),
+                                                e.display_name, sizeof(e.display_name));
+            if (!matched) {
+                LOG("  SKIP %s (prog_name=\"%s\" not in emulators.txt)",
+                    e.filename, e.prog_name);
+                skipped++;
+                continue;
+            }
+            LOG("  [%2d] %-40s  prog_name=\"%s\"  img_key=\"%s\"  display=\"%s\"",
+                g_emu_count, e.filename, e.prog_name, e.image_key, e.display_name);
+            g_emu_count++;
         }
-        // Pull the friendly name + image key from emulators.txt by prog_name.
-        // Missing rows just leave both fields empty (graphical mode skips them).
-        if (e.prog_name[0]) {
-            emulators_txt_lookup(e.prog_name,
-                                 e.image_key,    sizeof(e.image_key),
-                                 e.display_name, sizeof(e.display_name));
-        }
-        LOG("  [%2d] %-40s  prog_name=\"%s\"  img_key=\"%s\"  display=\"%s\"",
-            g_emu_count, e.filename, e.prog_name, e.image_key, e.display_name);
-        g_emu_count++;
+        LOG("Listed %d of %d .uf2 file(s) in %s (%d skipped).",
+            g_emu_count, g_emu_seen, g_emuDir, skipped);
     }
-    LOG("Found %d emulator UF2(s) in %s.", g_emu_count, g_emuDir);
 
     g_flash_prog_name[0] = '\0';
     g_flash_idx = -1;
+    g_flash_drift = false;
     if (app_launch_present()) {
         if (program_name_from_xip(APP_BASE_ADDR, APP_PARTITION_SIZE,
                                   g_flash_prog_name, sizeof(g_flash_prog_name))) {
@@ -342,6 +577,34 @@ void scanEmulators()
         }
     } else {
         LOG("No valid image currently in flash.");
+    }
+
+    // If we matched the in-flash image to an SD entry by program_name,
+    // CRC32-compare the two to detect "user dropped a new build on the card".
+    // If the bytes differ, set g_flash_drift so the picker reflashes on launch.
+    if (g_flash_idx >= 0) {
+        char full[FF_MAX_LFN];
+        snprintf(full, sizeof(full), "%s/%s", g_emuDir, g_emus[g_flash_idx].filename);
+
+        uf2_fingerprint_t fp = {0};
+        if (uf2_fingerprint_from_file(full, &fp)) {
+            uint32_t flash_crc = 0;
+            if (uf2_fingerprint_from_xip(fp.image_base, fp.image_size, &flash_crc)) {
+                if (flash_crc != fp.crc) {
+                    g_flash_drift = true;
+                    LOG("DRIFT: SD CRC=0x%08X  flash CRC=0x%08X  -> reflash on launch",
+                        (unsigned)fp.crc, (unsigned)flash_crc);
+                } else {
+                    LOG("In-flash image matches SD copy (CRC 0x%08X, %u bytes).",
+                        (unsigned)fp.crc, (unsigned)fp.image_size);
+                }
+            } else {
+                LOG("WARN: XIP fingerprint failed (base=0x%08X size=%u)",
+                    (unsigned)fp.image_base, (unsigned)fp.image_size);
+            }
+        } else {
+            LOG("WARN: SD fingerprint failed for %s", full);
+        }
     }
 }
 
@@ -482,9 +745,23 @@ int main()
     FrensSettings::initSettings(FrensSettings::emulators::MULTI);
     char dummyRom[FF_MAX_LFN];
     dummyRom[0] = '\0';
-    bool sdOk = Frens::initAll(dummyRom, CPUFREQ_KHZ, 0, 0, 256, false, false);
+    // useFrameBuffer=true: HSTX always has its own FB; on RP2350 PicoDVI
+    // (FRAMEBUFFERISPOSSIBLE) this picks the framebuffer path instead of
+    // line-streaming, which is what the FB-direct overlays (progress bar,
+    // error screen decor) need to have something to write to. RP2040 is
+    // out of scope -- FRAMEBUFFERISPOSSIBLE is false there and the flag
+    // is ignored at the !HSTX && FRAMEBUFFERISPOSSIBLE gate in
+    // FrensHelpers.cpp:1639.
+    bool sdOk = Frens::initAll(dummyRom, CPUFREQ_KHZ, 0, 0, 256, false, true);
     LOG("initAll done. SD mounted=%d  PSRAM=%d  framebufferUsed=%d",
         (int)sdOk, (int)Frens::isPsramEnabled(), (int)Frens::isFrameBufferUsed());
+
+    // Force 1:1 scaling so the full 320x240 framebuffer is shown. The global
+    // scaleMode8_7_ defaults to true and is read by the DVI core1 render loop
+    // to pick convertScanBuffer12bppScaled16_7 (clips 34 src px off the left)
+    // vs convertScanBuffer12bpp (1:1). applyScreenMode returns the new value
+    // -- we must assign it to the extern, like pico-infonesPlus does.
+    scaleMode8_7_ = Frens::applyScreenMode(ScreenMode::NOSCANLINE_1_1);
     if (sdOk) {
         char fstype[16] = {0};
         Frens::getFsInfo(fstype, sizeof(fstype));
@@ -502,24 +779,29 @@ int main()
         LOG("Flash capacity (JEDEC): %u bytes  app-end clamp: 0x%08X",
             (unsigned)cap, (unsigned)end);
     }
-
     screenBuffer = (charCell *)Frens::f_malloc(screenbufferSize);
     LOG("Allocated %u-byte screenBuffer at %p", (unsigned)screenbufferSize, screenBuffer);
 
     snprintf(g_emuDir, sizeof(g_emuDir), "/emu/%d", HW_CONFIG);
 
     if (!sdOk) {
-        LOG("FATAL: SD card mount failed; cannot list emulators.");
-        showMessage("SD card not found.", "Insert a card and reset.", nullptr);
-        for (;;) { tuh_task(); DrawScreen(-1); sleep_ms(16); }
+        fatalErrorScreen("SD CARD NOT FOUND",
+                         "Insert a FAT-formatted card",
+                         "and reset.",
+                         nullptr);
     }
 
-    // Pre-load the emulators.txt table so scanEmulators() can attach a friendly
-    // display name and image_key to each SdEmu entry as it goes. Missing or
-    // unreadable file is non-fatal -- text mode still shows the prog_name
-    // fallback labels and graphical mode just has nothing to show.
+    // Pre-load the emulators.txt table. It's now the allow-list that
+    // scanEmulators() filters SD .uf2 files against, so a missing or empty
+    // file means we'd hide every emulator and confuse the user with a
+    // "no matching emulators" screen. Name the real cause directly instead.
     LOG("Loading %s...", EMULATORS_TXT_PATH);
-    emulators_txt_load(EMULATORS_TXT_PATH);
+    if (!emulators_txt_load(EMULATORS_TXT_PATH)) {
+        fatalErrorScreen("EMULATORS.TXT MISSING",
+                         "Place an emulators.txt at",
+                         EMULATORS_TXT_PATH,
+                         "and reset.");
+    }
 
     // Parse program_name from every .uf2 on SD and from the in-flash image.
     // Briefly tell the user what's happening (this can take a second or two
@@ -530,11 +812,24 @@ int main()
     scanEmulators();
 
     if (g_emu_count == 0) {
-        LOG("FATAL: no .uf2 files in %s.", g_emuDir);
         char m[48];
-        snprintf(m, sizeof(m), "No emulators in %s", g_emuDir);
-        showMessage(m, "Copy emulator .uf2 files there", "and reset.");
-        for (;;) { tuh_task(); DrawScreen(-1); sleep_ms(16); }
+        if (g_emu_seen == 0) {
+            // No .uf2 files at all in the config dir.
+            snprintf(m, sizeof(m), "Nothing in %s", g_emuDir);
+            fatalErrorScreen("NO EMULATORS FOUND",
+                             m,
+                             "Copy emulator .uf2 files there",
+                             "and reset.");
+        } else {
+            // .uf2 files exist but none are listed in emulators.txt -- either
+            // the file is missing, or its entries don't match any prog_name.
+            snprintf(m, sizeof(m), "%d UF2 file(s) found in %s",
+                     g_emu_seen, g_emuDir);
+            fatalErrorScreen("NO MATCHING EMULATORS",
+                             m,
+                             "but none listed in",
+                             EMULATORS_TXT_PATH);
+        }
     }
 
     // --- PICKER LOOP --------------------------------------------------------
@@ -746,9 +1041,9 @@ int main()
 
         // A always launches the selected entry.
         if (pushed & Btn::A) {
-            LOG("A pressed. sel=%d (%s) flashed_idx=%d",
-                sel, g_emus[sel].label, g_flash_idx);
-            if (sel == g_flash_idx) {
+            LOG("A pressed. sel=%d (%s) flashed_idx=%d drift=%d",
+                sel, g_emus[sel].label, g_flash_idx, (int)g_flash_drift);
+            if (sel == g_flash_idx && !g_flash_drift) {
                 launchInFlash();
             } else {
                 flashAndLaunch(sel);

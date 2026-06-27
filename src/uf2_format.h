@@ -50,7 +50,11 @@ typedef struct __attribute__((packed)) {
     uint32_t magic_end;
 } uf2_block_t;
 
+#ifdef __cplusplus
+static_assert(sizeof(uf2_block_t) == UF2_BLOCK_SIZE, "UF2 block must be 512 bytes");
+#else
 _Static_assert(sizeof(uf2_block_t) == UF2_BLOCK_SIZE, "UF2 block must be 512 bytes");
+#endif
 
 /* Result of classifying a single block against the target partition. */
 typedef enum {
