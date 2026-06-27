@@ -41,7 +41,7 @@
 // (e.g. -DSS_MAX_SPRITES_PSRAM=10): the ceiling collapses to that value
 // and the runtime ternary picks the SRAM cap regardless.
 #ifndef SS_MAX_SPRITES_PSRAM
-#define SS_MAX_SPRITES_PSRAM   100
+#define SS_MAX_SPRITES_PSRAM   150
 #endif
 #ifndef SS_MAX_SPRITES_SRAM
 #define SS_MAX_SPRITES_SRAM    8
