@@ -236,7 +236,7 @@ bool load_pixels(const char *name, Sprite &out)
 
     FIL fil;
     if (f_open(&fil, path, FA_READ) != FR_OK) {
-        printf("[emuLoader] ss: cannot open %s\n", path);
+        printf("[bootLoader] ss: cannot open %s\n", path);
         return false;
     }
 
@@ -255,13 +255,13 @@ bool load_pixels(const char *name, Sprite &out)
     UINT want = (UINT)w * (UINT)h * sizeof(uint16_t);
     uint16_t *buf = (uint16_t *)Frens::f_malloc(want);
     if (!buf) {
-        printf("[emuLoader] ss: f_malloc(%u) failed for %s\n", (unsigned)want, path);
+        printf("[bootLoader] ss: f_malloc(%u) failed for %s\n", (unsigned)want, path);
         f_close(&fil);
         return false;
     }
 
     if (f_read(&fil, buf, want, &br) != FR_OK || br != want) {
-        printf("[emuLoader] ss: short read on %s (%u/%u)\n",
+        printf("[bootLoader] ss: short read on %s (%u/%u)\n",
                path, (unsigned)br, (unsigned)want);
         Frens::f_free(buf);
         f_close(&fil);
@@ -657,7 +657,7 @@ bool screensaver_init(void)
         (size_t)g_sprite_cap * (size_t)(FF_MAX_LFN + 1);
     g_chosen = (char (*)[FF_MAX_LFN + 1])Frens::f_malloc(chosen_bytes);
     if (!g_chosen) {
-        printf("[emuLoader] ss: chosen buffer alloc failed (%u B)\n",
+        printf("[bootLoader] ss: chosen buffer alloc failed (%u B)\n",
                (unsigned)chosen_bytes);
         return false;
     }
@@ -665,7 +665,7 @@ bool screensaver_init(void)
     // Allocate the per-frame / per-swap scratch arrays on the heap too --
     // at cap=100 these would exceed the 3 KB picker stack.
     if (!alloc_scratch(g_sprite_cap)) {
-        printf("[emuLoader] ss: scratch buffer alloc failed\n");
+        printf("[bootLoader] ss: scratch buffer alloc failed\n");
         Frens::f_free(g_chosen);
         g_chosen = nullptr;
         return false;
@@ -673,13 +673,13 @@ bool screensaver_init(void)
 
     g_spr_count = load_random_set(g_spr, &g_n_owners);
     if (g_spr_count == 0) {
-        printf("[emuLoader] ss: no usable images in %s\n", SS_DIR_PATH);
+        printf("[bootLoader] ss: no usable images in %s\n", SS_DIR_PATH);
         Frens::f_free(g_chosen);
         g_chosen = nullptr;
         return false;
     }
     g_frames_since_load = 0;
-    printf("[emuLoader] ss: %d sprite(s) loaded (%d owner+%d clone, mode=%d, cap=%d, psram=%d)\n",
+    printf("[bootLoader] ss: %d sprite(s) loaded (%d owner+%d clone, mode=%d, cap=%d, psram=%d)\n",
            g_spr_count, g_n_owners, g_spr_count - g_n_owners,
            SCREENSAVER_MODE, g_sprite_cap, (int)Frens::isPsramEnabled());
     return true;

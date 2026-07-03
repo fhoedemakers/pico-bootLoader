@@ -13,7 +13,7 @@ on:
 
 # Must match the project() name in CMakeLists.txt
 env:
-    APP_NAME: emuLoader
+    APP_NAME: bootLoader
 
 # Allow this workflow to write back to the repository
 permissions:
@@ -46,7 +46,7 @@ jobs:
                  grep "pico_set_program_version" CMakeLists.txt
                  grep SWVERSION pico_shared/menu.h
 
-          - name: Build emuLoader for every RP2350 hardware configuration
+          - name: Build bootLoader for every RP2350 hardware configuration
             run: |
                  chmod +x build*.sh bld.sh pico_shared/bld.sh
                  export PICO_SDK_PATH=/datalocal/pico/pico-sdk
@@ -87,7 +87,7 @@ jobs:
                  rm -rf release-zip
                  mkdir release-zip
                  ./.github/scripts/pack_release.sh release-zip emu-build .
-                 (cd release-zip && zip -r ../releases/pico_emuLoader_sdcard.zip emu)
+                 (cd release-zip && zip -r ../releases/pico-bootLoader_sdcard.zip emu)
 
           - name: List release artifacts
             run: |
@@ -98,5 +98,5 @@ jobs:
             if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
             with:
               files: |
-                releases/emuLoader*.uf2
-                releases/pico_emuLoader_sdcard.zip
+                releases/bootLoader*.uf2
+                releases/pico-bootLoader_sdcard.zip

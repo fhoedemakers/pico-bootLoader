@@ -1,5 +1,5 @@
 /*
- * boot_config.h - Flash memory map for the emuLoader bootloader.
+ * boot_config.h - Flash memory map for the bootLoader.
  *
  * The same numbers live in pico_shared/BootPartition.cmake (which links the
  * bootloader into the boot region and the emulators into the app partition).
@@ -10,7 +10,7 @@
  * Flash layout (Adafruit Fruit Jam, 16 MB):
  *
  *   0x10000000  +-----------------------------+  <- bootrom always boots this
- *               |   Bootloader (emuLoader)    |     image (the menu/flasher).
+ *               |   Bootloader (bootLoader)   |     image (the menu/flasher).
  *               |        1 MB                  |
  *   0x10100000  +-----------------------------+  <- APP_BASE_ADDR
  *               |   Application partition      |     emulator UF2s land here.

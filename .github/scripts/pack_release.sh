@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble an SD-card-ready tree for the pico_emuLoader release.
+# Assemble an SD-card-ready tree for the pico-bootLoader release.
 #
 # Layout produced:
 #   <output_dir>/emu/uf2/<HW_CONFIG>/<prog_name>.uf2

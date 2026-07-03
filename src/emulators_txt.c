@@ -73,7 +73,7 @@ bool emulators_txt_load(const char *path)
     FIL fil;
     FRESULT fr = f_open(&fil, path, FA_READ);
     if (fr != FR_OK) {
-        printf("[emuLoader] emulators_txt: cannot open %s (fr=%d)\n", path, fr);
+        printf("[bootLoader] emulators_txt: cannot open %s (fr=%d)\n", path, fr);
         return false;
     }
 
@@ -83,7 +83,7 @@ bool emulators_txt_load(const char *path)
     }
     f_close(&fil);
 
-    printf("[emuLoader] emulators_txt: %d row(s) loaded from %s\n", s_row_count, path);
+    printf("[bootLoader] emulators_txt: %d row(s) loaded from %s\n", s_row_count, path);
     return s_row_count > 0;
 }
 

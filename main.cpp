@@ -1,5 +1,5 @@
 /*
- * main.cpp - Pico emuLoader: a resident .uf2 bootloader frontend for the
+ * main.cpp - Pico bootLoader: a resident .uf2 bootloader frontend for the
  *            RP2350 retro-emulator family (shared pico_shared framework).
  *
  * Boot flow:
@@ -26,7 +26,7 @@
  * pico_shared/BootPartition.cmake and src/boot_config.h (single source).
  *
  * Serial output: all diagnostics go to UART (PICO_DEFAULT_UART, pins 44/45 on
- * Fruit Jam, 115200-8N1). Tag every line with "[emuLoader] " so they stand out
+ * Fruit Jam, 115200-8N1). Tag every line with "[bootLoader] " so they stand out
  * when the freshly-launched emulator starts speaking.
  */
 #include <cstdio>
@@ -114,7 +114,7 @@ namespace Frens { uint storage_get_flash_capacity(); }
 // actually read it.
 #define PICO_DVI_FLASH_NOTICE_MS  3500
 
-#define LOG(fmt, ...) printf("[emuLoader] " fmt "\n", ##__VA_ARGS__)
+#define LOG(fmt, ...) printf("[bootLoader] " fmt "\n", ##__VA_ARGS__)
 
 namespace {
 
@@ -751,7 +751,7 @@ int main()
     Frens::setClocksAndStartStdio(CPUFREQ_KHZ, VREG_VOLTAGE_1_30);
 
     // --- BANNER -------------------------------------------------------------
-    LOG("---- Pico emuLoader booting ----");
+    LOG("---- Pico bootLoader booting ----");
     LOG("Build: %s %s   SDK: " PICO_SDK_VERSION_STRING, __DATE__, __TIME__);
     LOG("HW_CONFIG=%d  sys_clk=%lu Hz  vreg=1.30V",
         HW_CONFIG, (unsigned long)clock_get_hz(clk_sys));

@@ -54,7 +54,7 @@ void gui_save_mode(const char *path, bool graphical)
 {
     FIL fil;
     if (f_open(&fil, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
-        printf("[emuLoader] gui: cannot write mode file %s\n", path);
+        printf("[bootLoader] gui: cannot write mode file %s\n", path);
         return;
     }
     char c = graphical ? '1' : '0';
@@ -70,7 +70,7 @@ bool gui_buffers_alloc(void)
     const size_t sz_full = SCREENWIDTH * SCREENHEIGHT * sizeof(uint16_t);
     if (!s_buf_cur)  s_buf_cur  = (uint16_t *)Frens::f_malloc(sz_full);
     if (!s_buf_cur) {
-        printf("[emuLoader] gui: cur buffer alloc failed (size=%u)\n", (unsigned)sz_full);
+        printf("[bootLoader] gui: cur buffer alloc failed (size=%u)\n", (unsigned)sz_full);
         return false;
     }
     // Second buffer enables the slide animation. With PSRAM we mirror cur
@@ -90,9 +90,9 @@ bool gui_buffers_alloc(void)
         }
     }
     if (!s_buf_next) {
-        printf("[emuLoader] gui: slide buffer alloc failed; animation disabled\n");
+        printf("[bootLoader] gui: slide buffer alloc failed; animation disabled\n");
     } else {
-        printf("[emuLoader] gui: buffers ready (cur=full, next=%s)\n",
+        printf("[bootLoader] gui: buffers ready (cur=full, next=%s)\n",
                s_next_is_half_res ? "half" : "full");
     }
     return true;
@@ -134,7 +134,7 @@ bool gui_load_image(const char *image_key, uint16_t *dest)
     FIL fil;
     FRESULT fr = f_open(&fil, path, FA_READ);
     if (fr != FR_OK) {
-        printf("[emuLoader] gui: cannot open %s (fr=%d)\n", path, (int)fr);
+        printf("[bootLoader] gui: cannot open %s (fr=%d)\n", path, (int)fr);
         return false;
     }
 
@@ -142,13 +142,13 @@ bool gui_load_image(const char *image_key, uint16_t *dest)
     UINT br = 0;
     fr = f_read(&fil, hdr, sizeof(hdr), &br);
     if (fr != FR_OK || br != sizeof(hdr)) {
-        printf("[emuLoader] gui: %s header read failed (fr=%d br=%u)\n",
+        printf("[bootLoader] gui: %s header read failed (fr=%d br=%u)\n",
                path, (int)fr, (unsigned)br);
         f_close(&fil);
         return false;
     }
     if (hdr[0] != SCREENWIDTH || hdr[1] != SCREENHEIGHT) {
-        printf("[emuLoader] gui: %s is %u x %u, expected %d x %d\n",
+        printf("[bootLoader] gui: %s is %u x %u, expected %d x %d\n",
                path, (unsigned)hdr[0], (unsigned)hdr[1], SCREENWIDTH, SCREENHEIGHT);
         f_close(&fil);
         return false;
@@ -158,7 +158,7 @@ bool gui_load_image(const char *image_key, uint16_t *dest)
     fr = f_read(&fil, dest, want, &br);
     f_close(&fil);
     if (fr != FR_OK || br != want) {
-        printf("[emuLoader] gui: %s pixel read short (fr=%d br=%u/%u)\n",
+        printf("[bootLoader] gui: %s pixel read short (fr=%d br=%u/%u)\n",
                path, (int)fr, (unsigned)br, (unsigned)want);
         return false;
     }
@@ -178,7 +178,7 @@ bool gui_load_image_half_res(const char *image_key, uint16_t *dest)
     FIL fil;
     FRESULT fr = f_open(&fil, path, FA_READ);
     if (fr != FR_OK) {
-        printf("[emuLoader] gui: cannot open %s (fr=%d)\n", path, (int)fr);
+        printf("[bootLoader] gui: cannot open %s (fr=%d)\n", path, (int)fr);
         return false;
     }
 
@@ -187,7 +187,7 @@ bool gui_load_image_half_res(const char *image_key, uint16_t *dest)
     fr = f_read(&fil, hdr, sizeof(hdr), &br);
     if (fr != FR_OK || br != sizeof(hdr) ||
         hdr[0] != SCREENWIDTH || hdr[1] != SCREENHEIGHT) {
-        printf("[emuLoader] gui: %s header bad (fr=%d br=%u, %ux%u)\n",
+        printf("[bootLoader] gui: %s header bad (fr=%d br=%u, %ux%u)\n",
                path, (int)fr, (unsigned)br, (unsigned)hdr[0], (unsigned)hdr[1]);
         f_close(&fil);
         return false;
@@ -200,7 +200,7 @@ bool gui_load_image_half_res(const char *image_key, uint16_t *dest)
         // Read the even source row, downsample horizontally into dest.
         fr = f_read(&fil, row, row_bytes, &br);
         if (fr != FR_OK || br != row_bytes) {
-            printf("[emuLoader] gui: %s short read row %d\n", path, 2 * y_out);
+            printf("[bootLoader] gui: %s short read row %d\n", path, 2 * y_out);
             f_close(&fil);
             return false;
         }
@@ -210,7 +210,7 @@ bool gui_load_image_half_res(const char *image_key, uint16_t *dest)
         // Read and discard the odd row (nearest-neighbour vertical decimation).
         fr = f_read(&fil, row, row_bytes, &br);
         if (fr != FR_OK || br != row_bytes) {
-            printf("[emuLoader] gui: %s short read row %d\n", path, 2 * y_out + 1);
+            printf("[bootLoader] gui: %s short read row %d\n", path, 2 * y_out + 1);
             f_close(&fil);
             return false;
         }

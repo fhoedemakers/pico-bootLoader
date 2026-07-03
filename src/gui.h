@@ -1,5 +1,5 @@
 /*
- * gui.h - Graphical menu support for pico_emuLoader.
+ * gui.h - Graphical menu support for pico-bootLoader.
  *
  * Loads 320x240 raw 16-bit artwork from /emu/assets/<key>.{444|555} (extension
  * picked by the shared FILEXTFORSEARCH macro), holds two reusable image

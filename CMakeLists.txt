@@ -1,10 +1,10 @@
-# pico_emuLoader - resident .uf2 bootloader frontend for the RP2350 emulators.
+# pico-bootLoader - resident .uf2 bootloader frontend for the RP2350 emulators.
 # IMPORTANT: Use the latest version of tinyusb and pico pio USB.
 # Build/USB structure mirrors pico-infonesPlus (the up-to-date PIO-USB pattern).
 
 cmake_minimum_required(VERSION 3.13)
 
-set(projectname emuLoader)
+set(projectname bootLoader)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 

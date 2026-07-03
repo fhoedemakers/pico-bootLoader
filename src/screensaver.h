@@ -1,5 +1,5 @@
 /*
- * screensaver.h - Idle screensaver for the pico_emuLoader picker.
+ * screensaver.h - Idle screensaver for the pico-bootLoader picker.
  *
  * After 30 s of input idle the picker calls screensaver_init() to load up to
  * 5 small images from /emu/assets/screensaver/, then screensaver_run_one_frame()

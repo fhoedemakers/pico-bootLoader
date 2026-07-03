@@ -1,4 +1,4 @@
-# pico_emuLoader
+# pico-bootLoader
 
 A resident `.uf2` **bootloader / front-end** for the RP2350 retro-emulator family
 (pico-infonesPlus, pico-pcePlus, pico-genesisPlus, pico-smsplus, pico-peanutGB, …),
@@ -40,7 +40,7 @@ mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DPICO_BOARD=pico2 -DHW_CONFIG=8 \
       -DPICO_PLATFORM=rp2350-arm-s -DENABLE_PIO_USB=1 -DUSE_PICO_EXTRAS_I2S=0 ..
 make -j
-# -> build/emuLoader.uf2   (flash via BOOTSEL)
+# -> build/bootLoader.uf2  (flash via BOOTSEL)
 ```
 
 Result is ~220 KB, well under the 1 MB bootloader region.
@@ -69,7 +69,7 @@ cmake -DCMAKE_BUILD_TYPE=Release -DPICO_BOARD=pico2 -DHW_CONFIG=8 \
 make -j
 ```
 
-and copy the resulting `.uf2` into `pico_emuLoader/uf2/<HW_CONFIG>/`.
+and copy the resulting `.uf2` into `pico-bootLoader/uf2/<HW_CONFIG>/`.
 
 Single build per emulator — there is **no** per-slot variant. (`pico_shared/bld.sh`
 does not pass `-DBUILD_FOR_BOOTLOADER`; use the manual cmake invocation above

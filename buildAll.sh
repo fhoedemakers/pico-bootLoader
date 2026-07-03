@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the emuLoader bootloader for every supported RP2350 hardware
+# Build the bootLoader for every supported RP2350 hardware
 # configuration. Outputs land in releases/.
 set -e
 cd "$(dirname "$0")"
