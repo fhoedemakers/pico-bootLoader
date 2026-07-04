@@ -10,9 +10,10 @@
  *      A physical reset / power-cycle does NOT set that flag, so it lands here
  *      and shows the menu -- exactly the requested behaviour.
  *   3. Otherwise: init display/SD/USB via the framework, list the emulator
- *      .uf2 files under /emu/<HW_CONFIG>/, identify which one is currently
- *      in the application partition by matching binary_info program names,
- *      and show a picker.
+ *      .uf2 files under <BASEDIR>/<HW_CONFIG>/ (BASEDIR defaults to /emu;
+ *      overridable via an optional /boot.txt INI on the SD root), identify
+ *      which one is currently in the application partition by matching
+ *      binary_info program names, and show a picker.
  *
  * Picker semantics (single-slot model):
  *   - One flat list of every .uf2 on SD.
@@ -60,6 +61,7 @@ extern "C" {
 #include "gui.h"
 #include "screensaver.h"
 #include "progress_bar.h"
+#include "sd_boot_ini.h"
 #include <hardware/divider.h>
 }
 
@@ -130,7 +132,7 @@ struct SdEmu {
     char display_name[DISPLAY_NAME_MAX];     // emulators.txt column 3 (human-readable)
 };
 
-char  g_emuDir[32];                   // "/emu/8"
+char  g_emuDir[80];                   // "<BASEDIR>/<HW_CONFIG>"
 SdEmu g_emus[32];
 int   g_emu_count = 0;                // entries actually shown (matched in emulators.txt)
 int   g_emu_seen  = 0;                // total .uf2 files found in g_emuDir, pre-filter
@@ -142,9 +144,11 @@ int   g_flash_idx = -1;                         // index into g_emus, or -1 if n
 // of the in-flash launch.
 bool  g_flash_drift = false;
 
-// User-visible mode toggle (SELECT). Persisted to /emu/.guimode across reboots.
-#define EMULATORS_TXT_PATH "/emu/emulators.txt"
-#define GUI_MODE_PATH      "/emu/.guimode"
+// Paths built at boot from /boot.txt (or its defaults). Consumed everywhere
+// the old EMULATORS_TXT_PATH / GUI_MODE_PATH macros used to be.
+char  g_index_path[144];              // "<BASEDIR>/<INDEX>"
+char  g_guimode_path[80];             // "<BASEDIR>/.guimode"
+
 #define GUI_SLIDE_PX_PER_FRAME 20            // 320 / 20 = 16 frames ≈ 270 ms
 
 // Fallback label derived from filename when binary_info parsing fails:
@@ -833,8 +837,6 @@ int main()
     screenBuffer = (charCell *)Frens::f_malloc(screenbufferSize);
     LOG("Allocated %u-byte screenBuffer at %p", (unsigned)screenbufferSize, screenBuffer);
 
-    snprintf(g_emuDir, sizeof(g_emuDir), "/emu/%d", HW_CONFIG);
-
     if (!sdOk) {
         fatalErrorScreen("SD CARD NOT FOUND",
                          "Insert a FAT-formatted card",
@@ -842,15 +844,38 @@ int main()
                          nullptr);
     }
 
-    // Pre-load the emulators.txt table. It's now the allow-list that
-    // scanEmulators() filters SD .uf2 files against, so a missing or empty
-    // file means we'd hide every emulator and confuse the user with a
+    // Load /boot.txt. Missing file -> defaults ("/emu", "emulators.txt",
+    // STARFIELD). Present but malformed -> fatal, so the user knows the
+    // config didn't take effect instead of silently reverting to defaults.
+    sd_boot_ini_t ini;
+    char ini_err[64] = {0};
+    LOG("Loading /boot.txt (optional)...");
+    if (sd_boot_ini_load("/boot.txt", &ini, ini_err, sizeof(ini_err)) != SD_BOOT_INI_OK) {
+        fatalErrorScreen("BOOT.TXT INVALID",
+                         ini_err,
+                         "Fix /boot.txt and reset.",
+                         nullptr);
+    }
+    LOG("boot_ini: BASEDIR=%s INDEX=%s SCREENSAVER=%s",
+        ini.base_dir, ini.index_file,
+        ini.screensaver == SS_MODE_STARFIELD ? "STARFIELD" : "BLOCKS");
+
+    snprintf(g_emuDir,       sizeof(g_emuDir),       "%s/%d",      ini.base_dir, HW_CONFIG);
+    snprintf(g_index_path,   sizeof(g_index_path),   "%s/%s",      ini.base_dir, ini.index_file);
+    snprintf(g_guimode_path, sizeof(g_guimode_path), "%s/.guimode", ini.base_dir);
+    gui_set_asset_dir(ini.base_dir);
+    screensaver_set_asset_dir(ini.base_dir);
+    screensaver_set_mode(ini.screensaver);
+
+    // Pre-load the emulators.txt (or user-renamed) index. It's the allow-list
+    // that scanEmulators() filters SD .uf2 files against, so a missing or
+    // empty file means we'd hide every emulator and confuse the user with a
     // "no matching emulators" screen. Name the real cause directly instead.
-    LOG("Loading %s...", EMULATORS_TXT_PATH);
-    if (!emulators_txt_load(EMULATORS_TXT_PATH)) {
-        fatalErrorScreen("EMULATORS.TXT MISSING",
-                         "Place an emulators.txt at",
-                         EMULATORS_TXT_PATH,
+    LOG("Loading %s...", g_index_path);
+    if (!emulators_txt_load(g_index_path)) {
+        fatalErrorScreen("INDEX FILE MISSING",
+                         "Place the index file at",
+                         g_index_path,
                          "and reset.");
     }
 
@@ -872,14 +897,14 @@ int main()
                              "Copy emulator .uf2 files there",
                              "and reset.");
         } else {
-            // .uf2 files exist but none are listed in emulators.txt -- either
+            // .uf2 files exist but none are listed in the index -- either
             // the file is missing, or its entries don't match any prog_name.
             snprintf(m, sizeof(m), "%d UF2 file(s) found in %s",
                      g_emu_seen, g_emuDir);
             fatalErrorScreen("NO MATCHING EMULATORS",
                              m,
                              "but none listed in",
-                             EMULATORS_TXT_PATH);
+                             g_index_path);
         }
     }
 
@@ -935,7 +960,7 @@ int main()
     };
 
     // Restore the last mode the user left us in (file lives on the SD card).
-    graphical_mode = gui_load_mode(GUI_MODE_PATH);
+    graphical_mode = gui_load_mode(g_guimode_path);
     LOG("Initial menu mode: %s", graphical_mode ? "graphical" : "text");
     if (graphical_mode) enter_graphical();
 
@@ -1047,7 +1072,7 @@ int main()
         if (pushed & Btn::SELECT) {
             graphical_mode = !graphical_mode;
             LOG("SELECT -> mode=%s", graphical_mode ? "graphical" : "text");
-            gui_save_mode(GUI_MODE_PATH, graphical_mode);
+            gui_save_mode(g_guimode_path, graphical_mode);
             if (graphical_mode) enter_graphical();
         }
 

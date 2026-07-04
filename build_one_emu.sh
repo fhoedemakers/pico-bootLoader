@@ -100,7 +100,7 @@ step "git           : $(git --version | head -1)"
 [ -d "$PICO_SDK_PATH" ]     || die "PICO_SDK_PATH ($PICO_SDK_PATH) is not a directory"
 step "PICO_SDK_PATH : $PICO_SDK_PATH"
 step "PICO_PIO_USB  : ${PICO_PIO_USB_PATH:-(unset)}"
-[ -f "$LOADER_DIR/uf2/emulators.txt" ] || die "uf2/emulators.txt not found (run from pico-bootLoader root)"
+[ -f "$LOADER_DIR/emu/emulators.txt" ] || die "uf2/emulators.txt not found (run from pico-bootLoader root)"
 step "loader dir    : $LOADER_DIR"
 step "build tree    : $BUILD_DIR  (kept outside the repo)"
 step "host cores    : $NPROC"
@@ -117,7 +117,7 @@ while IFS=';' read -r prog _rest || [ -n "${prog:-}" ]; do
         continue
     fi
     PROG_NAMES+=("$prog")
-done < "$LOADER_DIR/uf2/emulators.txt"
+done < "$LOADER_DIR/emu/emulators.txt"
 
 [ ${#PROG_NAMES[@]} -gt 0 ] || die "no buildable emulators found in uf2/emulators.txt"
 echo
@@ -289,7 +289,7 @@ build_one_emulator() {
         return 0
     fi
     local src_uf2="${matches[0]}"
-    local dest_uf2="$LOADER_DIR/uf2/$HWCONFIG/${prog}.uf2"
+    local dest_uf2="$LOADER_DIR/emu/$HWCONFIG/${prog}.uf2"
     cp "$src_uf2" "$dest_uf2"
     local bytes
     bytes=$(stat -c%s "$dest_uf2")
@@ -300,7 +300,7 @@ build_one_emulator() {
 
 # --- Build loop --------------------------------------------------------------
 mkdir -p "$BUILD_DIR"
-mkdir -p "$LOADER_DIR/uf2/$HWCONFIG"
+mkdir -p "$LOADER_DIR/emu/$HWCONFIG"
 STATUS_DIR=$(mktemp -d -t pico-emu-build.XXXXXX)
 LOGS_DIR="$STATUS_DIR/logs"
 mkdir -p "$LOGS_DIR"
@@ -315,7 +315,7 @@ info "pico_shared      : $SHARED_BRANCH"
 info "emulators        : ${#PROG_NAMES[@]}"
 info "parallelism      : $JOBS emulator(s) at a time"
 info "per-build cores  : $PER_PROC of $NPROC"
-info "install dir      : $LOADER_DIR/uf2/$HWCONFIG/"
+info "install dir      : $LOADER_DIR/emu/$HWCONFIG/"
 info "status dir       : $STATUS_DIR"
 if (( JOBS > 1 )); then
     info "per-emulator logs: $LOGS_DIR/<prog>.log"
@@ -454,8 +454,8 @@ echo "Missing output (${#MISSING[@]}/${TOTAL}):"
 for p in "${MISSING[@]}"; do echo "  ? $p"; done
 
 echo
-info "Installed files now in $LOADER_DIR/uf2/$HWCONFIG/:"
-ls -lh "$LOADER_DIR/uf2/$HWCONFIG/" 2>/dev/null | tail -n +2 | sed 's/^/    /' || true
+info "Installed files now in $LOADER_DIR/emu/$HWCONFIG/:"
+ls -lh "$LOADER_DIR/emu/$HWCONFIG/" 2>/dev/null | tail -n +2 | sed 's/^/    /' || true
 
 if (( JOBS > 1 )); then
     echo

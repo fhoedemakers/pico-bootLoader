@@ -12,6 +12,7 @@ namespace {
     uint16_t *s_buf_next         = nullptr;
     bool      s_next_is_half_res = false;   // true on SRAM-only configs
     const char *s_footer         = nullptr; // one-line button-hint overlay
+    char      s_asset_dir[64]    = "/emu";  // overridable via gui_set_asset_dir()
 }
 
 // Half-resolution dimensions for the slide-only buffer used when there is
@@ -64,6 +65,15 @@ void gui_save_mode(const char *path, bool graphical)
 }
 
 void gui_set_footer(const char *text) { s_footer = text; }
+
+void gui_set_asset_dir(const char *dir)
+{
+    if (!dir || !*dir) return;
+    size_t n = strlen(dir);
+    if (n >= sizeof(s_asset_dir)) n = sizeof(s_asset_dir) - 1;
+    memcpy(s_asset_dir, dir, n);
+    s_asset_dir[n] = '\0';
+}
 
 bool gui_buffers_alloc(void)
 {
@@ -129,7 +139,7 @@ bool gui_load_image(const char *image_key, uint16_t *dest)
     if (!dest || !image_key || !*image_key) return false;
 
     char path[FF_MAX_LFN + 1];
-    snprintf(path, sizeof(path), "/emu/assets/%s%s", image_key, FILEXTFORSEARCH);
+    snprintf(path, sizeof(path), "%s/assets/%s%s", s_asset_dir, image_key, FILEXTFORSEARCH);
 
     FIL fil;
     FRESULT fr = f_open(&fil, path, FA_READ);
@@ -173,7 +183,7 @@ bool gui_load_image_half_res(const char *image_key, uint16_t *dest)
     if (!dest || !image_key || !*image_key) return false;
 
     char path[FF_MAX_LFN + 1];
-    snprintf(path, sizeof(path), "/emu/assets/%s%s", image_key, FILEXTFORSEARCH);
+    snprintf(path, sizeof(path), "%s/assets/%s%s", s_asset_dir, image_key, FILEXTFORSEARCH);
 
     FIL fil;
     FRESULT fr = f_open(&fil, path, FA_READ);

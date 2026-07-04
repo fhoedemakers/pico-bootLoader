@@ -19,7 +19,7 @@ message("* Current build type is : ${CMAKE_BUILD_TYPE}")
 # Hardware / board selection
 # ---------------------------------------------------------------------------
 if(NOT HW_CONFIG)
-    set(HW_CONFIG 7 CACHE STRING "Select the hardware configuration for your board")
+    set(HW_CONFIG 2 CACHE STRING "Select the hardware configuration for your board")
 endif()
 if(NOT USE_HSTX)
     set(USE_HSTX 1 CACHE STRING "Use HSTX for display output when possible")
@@ -77,6 +77,7 @@ add_executable(${projectname}
     src/storage_pico.c
     src/program_name.c
     src/emulators_txt.c
+    src/sd_boot_ini.c
     src/uf2_crc.cpp
     src/gui.cpp
     src/screensaver.cpp

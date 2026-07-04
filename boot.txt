@@ -1,0 +1,64 @@
+# =============================================================================
+# boot.txt - pico-bootLoader configuration (sample)
+# =============================================================================
+# Copy this file to the ROOT of your SD card as /boot.txt to change where the
+# bootloader looks for its data, or to pick a different idle-screensaver style.
+#
+# If /boot.txt is absent, the bootloader uses the built-in defaults (equivalent
+# to the values shown below, EXCEPT for SCREENSAVER -- see its note).
+#
+# Syntax:
+#   - One KEY=VALUE per line.
+#   - Whitespace around the '=' and around the value is trimmed.
+#   - Lines starting with '#' or ';' are comments.
+#   - Blank lines are ignored.
+#   - Keys are case-insensitive; values are case-insensitive for SCREENSAVER
+#     and case-sensitive for BASEDIR/INDEX (filesystem paths).
+#   - A malformed file shows an on-screen error at boot -- fix and reset.
+# =============================================================================
+
+
+# --- BASEDIR -----------------------------------------------------------------
+# Absolute path (must start with '/') on the SD card where the bootloader
+# looks for everything: emulator .uf2 files, artwork, screensaver assets, and
+# the .guimode persistence file.
+#
+# Layout expected under BASEDIR:
+#   <BASEDIR>/<HW_CONFIG>/*.uf2          emulator/app images for this board
+#   <BASEDIR>/<INDEX>                    the allow-list (see INDEX below)
+#   <BASEDIR>/assets/<key>.444|.555      per-app splash artwork
+#   <BASEDIR>/assets/screensaver/*       screensaver sprites (optional)
+#   <BASEDIR>/.guimode                   remembers text vs graphical mode
+#
+# Default: /emu
+#
+BASEDIR=/emu
+
+
+# --- INDEX -------------------------------------------------------------------
+# Bare filename (no slashes) of the allow-list inside BASEDIR. Only .uf2 files
+# whose program_name appears in this file are shown in the picker; the file
+# also supplies the display name and the splash-artwork key for each entry.
+#
+# Format of each row: <program_name>;<image_key>;<display_name>
+#
+# Default: emulators.txt
+#
+INDEX=emulators.txt
+
+
+# --- SCREENSAVER -------------------------------------------------------------
+# Idle visual mode. Kicks in after ~30 s of no input; any button press exits.
+#
+# Values (case-insensitive):
+#   STARFIELD   Sprites fly outward from screen centre, growing as they
+#               approach the camera. (This is the default when /boot.txt is
+#               ABSENT.)
+#   BLOCKS      Sprites float and bounce off screen edges and each other;
+#               the on-screen set is re-picked every 15 s.
+#
+# Note: when /boot.txt is PRESENT but this key is absent, the bootloader uses
+# BLOCKS. So if you want STARFIELD, set it explicitly here (as this sample
+# does).
+#
+SCREENSAVER=STARFIELD

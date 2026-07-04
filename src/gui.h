@@ -1,7 +1,9 @@
 /*
  * gui.h - Graphical menu support for pico-bootLoader.
  *
- * Loads 320x240 raw 16-bit artwork from /emu/assets/<key>.{444|555} (extension
+ * Loads 320x240 raw 16-bit artwork from <BASEDIR>/assets/<key>.{444|555}
+ * (BASEDIR defaults to /emu; overridable at runtime via gui_set_asset_dir()
+ * fed from /boot.txt). Extension
  * picked by the shared FILEXTFORSEARCH macro), holds two reusable image
  * buffers in PSRAM (current + incoming), composes a horizontal slide between
  * them per scanline, and writes the result straight into whichever framebuffer
@@ -34,6 +36,12 @@ extern "C" {
 bool gui_load_mode(const char *path);
 void gui_save_mode(const char *path, bool graphical);
 
+/* Override the base directory under which artwork lives. gui_load_image*
+ * then reads from "<dir>/assets/<key><ext>". Default is "/emu" -- callers
+ * that support /boot.txt call this once at startup after parsing it.
+ * NULL / empty input is a silent no-op. */
+void gui_set_asset_dir(const char *dir);
+
 /* Allocate the image buffers. The cur buffer is always full resolution
  * (320x240, ~150 KB). The next buffer is full resolution when PSRAM is
  * available, or half resolution (160x120, ~38 KB) when it isn't -- the
@@ -55,9 +63,9 @@ uint16_t *gui_buf_cur(void);
 uint16_t *gui_buf_next(void);
 void      gui_swap_buffers(void);
 
-/* Load /emu/assets/<image_key>.<FILEXTFORSEARCH> into the 320x240 buffer.
- * Returns false if the file is missing, the header is wrong, or the read
- * comes up short. */
+/* Load <asset_dir>/assets/<image_key>.<FILEXTFORSEARCH> into the 320x240
+ * buffer. Returns false if the file is missing, the header is wrong, or the
+ * read comes up short. */
 bool gui_load_image(const char *image_key, uint16_t *dest_320x240);
 
 /* Load the same artwork but downsample 2x in each axis on the fly, writing
