@@ -19,7 +19,7 @@ message("* Current build type is : ${CMAKE_BUILD_TYPE}")
 # Hardware / board selection
 # ---------------------------------------------------------------------------
 if(NOT HW_CONFIG)
-    set(HW_CONFIG 2 CACHE STRING "Select the hardware configuration for your board")
+    set(HW_CONFIG 8 CACHE STRING "Select the hardware configuration for your board")
 endif()
 if(NOT USE_HSTX)
     set(USE_HSTX 1 CACHE STRING "Use HSTX for display output when possible")
@@ -82,6 +82,7 @@ add_executable(${projectname}
     src/gui.cpp
     src/screensaver.cpp
     src/progress_bar.cpp
+    src/image_convert.cpp
 )
 
 pico_set_program_name(${projectname} "${projectname}")
