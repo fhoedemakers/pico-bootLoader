@@ -32,7 +32,17 @@ typedef struct {
     uint32_t crc;          /* CRC32 over payload bytes in target-addr order     */
 } uf2_fingerprint_t;
 
+/* Fingerprint the RP2350 ARM-S image in a .uf2 file. Skips the errata-E10
+ * header block; walks only RP2350_ARM_S program blocks. */
 bool uf2_fingerprint_from_file(const char *path, uf2_fingerprint_t *out);
+
+/* Same, but for a different UF2 family (e.g. UF2_FAMILY_RP2350_DATA for a
+ * DATA-family blob). No errata-E10 filter is applied here -- data-family
+ * UF2s don't carry that header. */
+bool uf2_fingerprint_from_file_family(const char *path,
+                                      uint32_t expected_family,
+                                      uf2_fingerprint_t *out);
+
 bool uf2_fingerprint_from_xip(uint32_t base, uint32_t size, uint32_t *out_crc);
 
 #ifdef __cplusplus

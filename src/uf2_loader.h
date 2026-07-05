@@ -41,6 +41,8 @@ typedef void (*uf2_progress_cb)(int phase, uint32_t done, uint32_t total);
 /*
  * Program the named file (must already be openable via storage_open) into the
  * application partition. Erases only the sectors the image actually touches.
+ * Uses the built-in RP2350_ARM_S family and [APP_BASE_ADDR, g_app_end_addr)
+ * range.
  */
 uf2_load_result_t uf2_load_file(const char *name,
                                 uf2_load_stats_t *stats,
@@ -54,6 +56,26 @@ uf2_load_result_t uf2_load_file(const char *name,
  * programmable, page-aligned, in-range block for this chip/partition.
  */
 uf2_load_result_t uf2_validate_file(const char *name, uf2_load_stats_t *stats);
+
+/*
+ * Same as uf2_load_file / uf2_validate_file, but with an explicit target range
+ * [region_base, region_end) and expected_family. Used for aux blobs
+ * (e.g. Doom WHX at 0x10400000, DATA family). region_base must be
+ * >= APP_BASE_ADDR (we never write into the bootloader partition) and
+ * region_end must be <= the runtime-clamped g_app_end_addr.
+ */
+uf2_load_result_t uf2_load_file_ex(const char *name,
+                                   uint32_t region_base,
+                                   uint32_t region_end,
+                                   uint32_t expected_family,
+                                   uf2_load_stats_t *stats,
+                                   uf2_progress_cb progress);
+
+uf2_load_result_t uf2_validate_file_ex(const char *name,
+                                       uint32_t region_base,
+                                       uint32_t region_end,
+                                       uint32_t expected_family,
+                                       uf2_load_stats_t *stats);
 
 const char *uf2_load_result_str(uf2_load_result_t r);
 

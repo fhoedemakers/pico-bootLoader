@@ -53,6 +53,7 @@
 extern "C" {
 #include "boot_config.h"
 #include "uf2_loader.h"
+#include "uf2_format.h"
 #include "app_launch.h"
 #include "storage.h"
 #include "program_name.h"
@@ -123,6 +124,7 @@ namespace {
 #define PROG_NAME_MAX 32
 #define IMAGE_KEY_MAX 16
 #define DISPLAY_NAME_MAX 40
+#define AUX_UF2_MAX 64
 
 struct SdEmu {
     char filename[ROMLISTER_MAXPATH];        // basename
@@ -130,6 +132,7 @@ struct SdEmu {
     char prog_name[PROG_NAME_MAX];           // binary_info match key ("" if not extractable)
     char image_key[IMAGE_KEY_MAX];           // emulators.txt column 2 ("md", "nes", ...)
     char display_name[DISPLAY_NAME_MAX];     // emulators.txt column 3 (human-readable)
+    char aux_uf2[AUX_UF2_MAX];               // emulators.txt column 4 (basename of aux .uf2; "" = none)
 };
 
 char  g_emuDir[80];                   // "<BASEDIR>/<HW_CONFIG>"
@@ -551,6 +554,7 @@ void scanEmulators()
             e.prog_name[0]    = '\0';
             e.image_key[0]    = '\0';
             e.display_name[0] = '\0';
+            e.aux_uf2[0]      = '\0';
             bool ok = program_name_from_uf2_file(full, e.prog_name, sizeof(e.prog_name));
             if (!ok || !e.prog_name[0]) {
                 LOG("  SKIP %s (binary_info parse failed; no program_name)", e.filename);
@@ -565,15 +569,17 @@ void scanEmulators()
             // on this card -- the bootloader trusts the txt as the allow-list.
             bool matched = emulators_txt_lookup(e.prog_name,
                                                 e.image_key,    sizeof(e.image_key),
-                                                e.display_name, sizeof(e.display_name));
+                                                e.display_name, sizeof(e.display_name),
+                                                e.aux_uf2,      sizeof(e.aux_uf2));
             if (!matched) {
                 LOG("  SKIP %s (prog_name=\"%s\" not in emulators.txt)",
                     e.filename, e.prog_name);
                 skipped++;
                 continue;
             }
-            LOG("  [%2d] %-40s  prog_name=\"%s\"  img_key=\"%s\"  display=\"%s\"",
-                g_emu_count, e.filename, e.prog_name, e.image_key, e.display_name);
+            LOG("  [%2d] %-40s  prog_name=\"%s\"  img_key=\"%s\"  display=\"%s\"%s%s",
+                g_emu_count, e.filename, e.prog_name, e.image_key, e.display_name,
+                e.aux_uf2[0] ? "  aux=" : "", e.aux_uf2[0] ? e.aux_uf2 : "");
             g_emu_count++;
         }
         LOG("Listed %d of %d .uf2 file(s) in %s (%d skipped).",
@@ -633,7 +639,64 @@ void scanEmulators()
     }
 }
 
-// Launch the already-flashed emulator. No flash op; just reset core1 and jump.
+// AuxState tells the launch dispatcher how to handle a row's aux blob.
+//   NO_AUX  : emulators.txt has no 4th column for this row -- ignore aux entirely.
+//   MATCH   : SD file's CRC matches the bytes already at its target XIP address.
+//   DRIFT   : SD and flash differ (or the flash region is blank) -- reflash needed.
+//   ERROR   : couldn't fingerprint the SD file -- log and proceed without flashing.
+enum AuxState { AUX_NO_AUX, AUX_MATCH, AUX_DRIFT, AUX_ERROR };
+
+static AuxState computeAuxDrift(int idx, uf2_fingerprint_t *out_fp)
+{
+    if (out_fp) *out_fp = {};
+    if (idx < 0 || idx >= g_emu_count) return AUX_NO_AUX;
+    const char *aux = g_emus[idx].aux_uf2;
+    if (!aux[0]) return AUX_NO_AUX;
+
+    char full[FF_MAX_LFN];
+    snprintf(full, sizeof(full), "%s/%s", g_emuDir, aux);
+
+    uf2_fingerprint_t fp = {0};
+    if (!uf2_fingerprint_from_file_family(full, UF2_FAMILY_RP2350_DATA, &fp)) {
+        LOG("WARN: aux fingerprint failed for %s -- launching without flashing it", full);
+        return AUX_ERROR;
+    }
+    if (out_fp) *out_fp = fp;
+
+    uint32_t flash_crc = 0;
+    if (!uf2_fingerprint_from_xip(fp.image_base, fp.image_size, &flash_crc)) {
+        LOG("WARN: aux XIP fingerprint failed (base=0x%08X size=%u)",
+            (unsigned)fp.image_base, (unsigned)fp.image_size);
+        return AUX_DRIFT;   // safest: reflash
+    }
+    if (flash_crc == fp.crc) {
+        LOG("Aux blob already in flash (CRC 0x%08X, %u bytes at 0x%08X); skipping.",
+            (unsigned)fp.crc, (unsigned)fp.image_size, (unsigned)fp.image_base);
+        return AUX_MATCH;
+    }
+    LOG("Aux drift: SD CRC=0x%08X  flash CRC=0x%08X  -> reflash on launch",
+        (unsigned)fp.crc, (unsigned)flash_crc);
+    return AUX_DRIFT;
+}
+
+// Do the final "hand off to the emulator" sequence: quiesce I2C/core1, mark
+// the handshake register, and VTOR-jump. Never returns on success.
+[[noreturn]] void handoffToApp(const char *label)
+{
+    LOG("Launching %s; bye!", label ? label : "(unknown)");
+    stdio_flush();
+#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+    wiipad_end();
+#endif
+    multicore_reset_core1();   // hand HSTX over; emulator brings its own driver up
+    Frens::markLaunchedFromBootloader();
+    app_launch_run();          // VTOR jump; no return on success
+    LOG("app_launch_run() returned unexpectedly.");
+    watchdog_reboot(0, 0, 0);
+    for (;;) tight_loop_contents();
+}
+
+// Launch the already-flashed emulator. No flash op; just quiesce and jump.
 void launchInFlash()
 {
     LOG("Launching in-flash emulator: %s", g_flash_prog_name);
@@ -643,33 +706,72 @@ void launchInFlash()
         idleFor(2500);
         return;
     }
-#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
-    wiipad_end();              // release I2C so the emulator can re-init it cleanly
-#endif
-    multicore_reset_core1();   // bootloader's HSTX driver lives on core1; quiesce
-    stdio_flush();
-    Frens::markLaunchedFromBootloader();
-    app_launch_run();          // VTOR jump; no return on success
-    LOG("app_launch_run() returned unexpectedly.");
+    handoffToApp(g_flash_prog_name);
 }
 
-// Flash the SD .uf2 at g_emus[idx] into the app partition and launch it.
-void flashAndLaunch(int idx)
+// Flash paths (emulator .uf2 and optional aux .uf2) into flash and launch the
+// emulator. Either or both flashes can be requested:
+//   flashEmu=true  : write g_emus[idx].filename to the app partition.
+//   flashAux=true  : write g_emus[idx].aux_uf2 at *auxFp's target address.
+// If both are false, callers should use launchInFlash() instead -- but this
+// function still handles that case gracefully by just jumping.
+void flashAndLaunch(int idx, bool flashEmu, bool flashAux, const uf2_fingerprint_t *auxFp)
 {
     char full[FF_MAX_LFN];
     snprintf(full, sizeof(full), "%s/%s", g_emuDir, g_emus[idx].filename);
-    LOG("Flash & launch: [%d] %s", idx, full);
+    LOG("Flash & launch: [%d] %s  flashEmu=%d flashAux=%d",
+        idx, full, (int)flashEmu, (int)flashAux);
 
-    // Pre-flight while the display is alive.
-    LOG("Pre-flight validating UF2 (pass 1, no flash writes)...");
     uf2_load_stats_t st;
-    uf2_load_result_t vr = uf2_validate_file(full, &st);
-    LOG("  result: %s", uf2_load_result_str(vr));
-    if (vr != UF2_LOAD_OK) {
-        LOG("REJECTED: %s", uf2_load_result_str(vr));
-        showMessage("Cannot flash this file:", g_emus[idx].filename, uf2_load_result_str(vr));
-        idleFor(3000);
-        return;
+
+    // Pre-flight the emulator UF2 first (display still alive). Skip if the
+    // caller just wants the aux flashed.
+    if (flashEmu) {
+        LOG("Pre-flight validating emulator UF2 (pass 1, no flash writes)...");
+        uf2_load_result_t vr = uf2_validate_file(full, &st);
+        LOG("  result: %s", uf2_load_result_str(vr));
+        if (vr != UF2_LOAD_OK) {
+            LOG("REJECTED: %s", uf2_load_result_str(vr));
+            showMessage("Cannot flash this file:", g_emus[idx].filename, uf2_load_result_str(vr));
+            idleFor(3000);
+            return;
+        }
+    }
+
+    // Pre-flight the aux UF2 too, using its own target range (derived from
+    // the fingerprint pass, so we don't re-scan the file).
+    char auxFull[FF_MAX_LFN] = {0};
+    if (flashAux) {
+        if (!auxFp || !g_emus[idx].aux_uf2[0]) {
+            LOG("BUG: flashAux=true but no aux fingerprint / column");
+            return;
+        }
+        snprintf(auxFull, sizeof(auxFull), "%s/%s", g_emuDir, g_emus[idx].aux_uf2);
+        LOG("Pre-flight validating aux UF2 %s at [0x%08X..0x%08X)...",
+            auxFull, (unsigned)auxFp->image_base,
+            (unsigned)(auxFp->image_base + auxFp->image_size));
+        uf2_load_stats_t astp;
+        uf2_load_result_t vr = uf2_validate_file_ex(auxFull,
+            auxFp->image_base, auxFp->image_base + auxFp->image_size,
+            UF2_FAMILY_RP2350_DATA, &astp);
+        LOG("  result: %s", uf2_load_result_str(vr));
+        if (vr != UF2_LOAD_OK) {
+            LOG("REJECTED aux: %s", uf2_load_result_str(vr));
+            showMessage("Cannot flash aux blob:", g_emus[idx].aux_uf2, uf2_load_result_str(vr));
+            idleFor(3000);
+            return;
+        }
+    }
+
+    // Build a short header line naming what's being flashed. The user cares
+    // about "Flashing" more than which one; keep the extra line short.
+    const char *line1 = "Flashing";
+    const char *line2 = g_emus[idx].label;
+    const char *line3 = "Do not power off.";
+    if (flashAux && !flashEmu) {
+        line1 = "Flashing WAD";
+    } else if (flashAux && flashEmu) {
+        line3 = "WAD + emulator...";
     }
 
 #if HSTX
@@ -677,7 +779,7 @@ void flashAndLaunch(int idx)
     // on core1, so it keeps running cleanly through every flash erase/write
     // window. The live progress bar updates in real time and the audit in
     // framework-flash-while-running.md keeps core1 SRAM-only throughout.
-    showMessage("Flashing", g_emus[idx].label, "Do not power off.");
+    showMessage(line1, line2, line3);
     DrawScreen(-1);
     idleFor(FLASH_NOTICE_MS);
 
@@ -704,38 +806,57 @@ void flashAndLaunch(int idx)
     multicore_reset_core1();
 #endif
 
-    uf2_load_result_t r = uf2_load_file(full, &st, flashProgress);
-    if (r == UF2_LOAD_OK) {
+    // Aux blob first (small, and we want it in place before the emulator
+    // boots and reads from it). See plan for the ordering rationale.
+    if (flashAux) {
+        LOG("Flashing aux blob %s ...", auxFull);
+        uf2_load_stats_t ast;
+        uf2_load_result_t r = uf2_load_file_ex(auxFull,
+            auxFp->image_base, auxFp->image_base + auxFp->image_size,
+            UF2_FAMILY_RP2350_DATA, &ast, flashProgress);
+        if (r != UF2_LOAD_OK) {
+            LOG("Aux flash FAILED: %s (after %u programmed, %u skipped)",
+                uf2_load_result_str(r),
+                (unsigned)ast.programmed_blocks, (unsigned)ast.skipped_blocks);
+            stdio_flush();
+            watchdog_reboot(0, 0, 0);
+            for (;;) tight_loop_contents();
+        }
+        LOG("Aux flash OK: %u blocks written to 0x%08X..0x%08X",
+            (unsigned)ast.programmed_blocks,
+            (unsigned)ast.lowest_addr, (unsigned)ast.highest_addr);
 #if HSTX
-        // Force a final 100% paint before we tear down core1.
-        progress_bar_draw(100, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
+        // Reset the bar to 0% for the next phase so the second flash starts
+        // fresh instead of finishing full-on-full.
+        if (flashEmu) progress_bar_draw(0, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
 #endif
+    }
+
+    if (flashEmu) {
+        LOG("Flashing emulator %s ...", full);
+        uf2_load_result_t r = uf2_load_file(full, &st, flashProgress);
+        if (r != UF2_LOAD_OK) {
+            LOG("Flash FAILED: %s (after %u programmed, %u skipped)",
+                uf2_load_result_str(r),
+                (unsigned)st.programmed_blocks, (unsigned)st.skipped_blocks);
+            stdio_flush();
+            watchdog_reboot(0, 0, 0);
+            for (;;) tight_loop_contents();
+        }
         LOG("Flash OK: %u blocks written to 0x%08X..0x%08X",
             (unsigned)st.programmed_blocks,
             (unsigned)st.lowest_addr, (unsigned)st.highest_addr);
-        logAppPartitionState("after flash");
-        if (app_launch_present()) {
-            LOG("Launching %s; bye!", g_emus[idx].label);
-            stdio_flush();
-#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
-            wiipad_end();              // free I2C for the emulator's own init
-#endif
-#if HSTX
-            multicore_reset_core1();   // hand HSTX over; emulator brings its own driver up
-#endif
-            // picoDVI: core1 was already reset above the flash sequence, no
-            // need to reset again.
-            Frens::markLaunchedFromBootloader();
-            app_launch_run();          // no return on success
-            LOG("app_launch_run() returned unexpectedly.");
-        } else {
-            LOG("ERROR: app_launch_present()=false after flash; rebooting.");
-        }
-    } else {
-        LOG("Flash FAILED: %s (after %u programmed, %u skipped)",
-            uf2_load_result_str(r),
-            (unsigned)st.programmed_blocks, (unsigned)st.skipped_blocks);
     }
+
+#if HSTX
+    // Force a final 100% paint before we tear down core1.
+    progress_bar_draw(100, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
+#endif
+    logAppPartitionState("after flash");
+    if (app_launch_present()) {
+        handoffToApp(g_emus[idx].label);
+    }
+    LOG("ERROR: app_launch_present()=false after flash; rebooting.");
 
     // Reboot to recover a clean state; the resume check's app_launch_present()
     // guard prevents jumping into a half-written partition.
@@ -1121,12 +1242,21 @@ int main()
 
         // A always launches the selected entry.
         if (pushed & Btn::A) {
-            LOG("A pressed. sel=%d (%s) flashed_idx=%d drift=%d",
-                sel, g_emus[sel].label, g_flash_idx, (int)g_flash_drift);
-            if (sel == g_flash_idx && !g_flash_drift) {
-                launchInFlash();
+            LOG("A pressed. sel=%d (%s) flashed_idx=%d emu_drift=%d aux=\"%s\"",
+                sel, g_emus[sel].label, g_flash_idx, (int)g_flash_drift,
+                g_emus[sel].aux_uf2);
+            // Compute both drifts before touching the display -- both walks
+            // read from SD and might take a beat on slow cards, so let the
+            // menu stay live during the check.
+            bool emuDrift = (sel != g_flash_idx) || g_flash_drift;
+            uf2_fingerprint_t auxFp;
+            AuxState auxState = computeAuxDrift(sel, &auxFp);
+            bool flashAux = (auxState == AUX_DRIFT);
+
+            if (emuDrift || flashAux) {
+                flashAndLaunch(sel, emuDrift, flashAux, flashAux ? &auxFp : nullptr);
             } else {
-                flashAndLaunch(sel);
+                launchInFlash();
             }
             // If we get here, either the launch was refused or flash failed;
             // both paths reboot the bootloader so we shouldn't actually reach

@@ -24,10 +24,11 @@ extern "C" {
 #include "ff.h"          /* for UINT in crc32.h's signature */
 #include "crc32.h"
 
-/* Same metadata-block filter as src/program_name.c. RP2350 SDK UF2 files start
- * with a non-program block (target_addr 0x10ffff00 with EXT_TAGS_PRESENT set);
- * skip it so it doesn't pollute the CRC or the address range. */
-static bool block_is_program(const uf2_block_t *b)
+/* Family-parameterised program-block filter. RP2350 SDK UF2 files start with a
+ * non-program block (target_addr 0x10ffff00 with EXT_TAGS_PRESENT set) for the
+ * ARM-S variant; the DATA family has no such header. Skip EXT_TAGS_PRESENT
+ * unconditionally -- data-family UF2s never set it, so this stays neutral. */
+static bool block_is_program(const uf2_block_t *b, uint32_t expected_family)
 {
     if (b->magic_start0 != UF2_MAGIC_START0) return false;
     if (b->magic_start1 != UF2_MAGIC_START1) return false;
@@ -35,13 +36,15 @@ static bool block_is_program(const uf2_block_t *b)
     if (b->flags & UF2_FLAG_NOT_MAIN_FLASH)  return false;
     if (b->flags & UF2_FLAG_EXT_TAGS_PRESENT) return false;
     if (b->flags & UF2_FLAG_FAMILY_ID_PRESENT) {
-        if (b->file_size_or_family != UF2_FAMILY_RP2350_ARM_S) return false;
+        if (b->file_size_or_family != expected_family) return false;
     }
     if (b->payload_size == 0 || b->payload_size > UF2_MAX_PAYLOAD) return false;
     return true;
 }
 
-bool uf2_fingerprint_from_file(const char *path, uf2_fingerprint_t *out)
+bool uf2_fingerprint_from_file_family(const char *path,
+                                      uint32_t expected_family,
+                                      uf2_fingerprint_t *out)
 {
     if (!out) return false;
     std::memset(out, 0, sizeof(*out));
@@ -64,7 +67,7 @@ bool uf2_fingerprint_from_file(const char *path, uf2_fingerprint_t *out)
         if (blk.magic_start0 != UF2_MAGIC_START0) break;
         if (blk.magic_start1 != UF2_MAGIC_START1) break;
         if (blk.magic_end    != UF2_MAGIC_END)    break;
-        if (!block_is_program(&blk)) continue;
+        if (!block_is_program(&blk, expected_family)) continue;
 
         if (blk.target_addr < lo) lo = blk.target_addr;
         uint32_t end = blk.target_addr + blk.payload_size;
@@ -80,6 +83,11 @@ bool uf2_fingerprint_from_file(const char *path, uf2_fingerprint_t *out)
     out->image_size = hi - lo;
     out->crc        = crc;
     return true;
+}
+
+bool uf2_fingerprint_from_file(const char *path, uf2_fingerprint_t *out)
+{
+    return uf2_fingerprint_from_file_family(path, UF2_FAMILY_RP2350_ARM_S, out);
 }
 
 bool uf2_fingerprint_from_xip(uint32_t base, uint32_t size, uint32_t *out_crc)

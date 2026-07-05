@@ -65,10 +65,69 @@ const char *uf2_load_result_str(uf2_load_result_t r)
     }
 }
 
-uf2_load_result_t uf2_load_file(const char *name,
-                                uf2_load_stats_t *stats,
-                                uf2_progress_cb progress)
+/* Pass-1 walker: validate every block and populate st with the exact address
+ * range the image occupies. Shared by uf2_validate_file_ex and uf2_load_file_ex.
+ * Requires storage_open() to have been called by the caller; the caller also
+ * owns closing the file on error/return. */
+static uf2_load_result_t validate_pass(uint32_t region_base,
+                                       uint32_t region_end,
+                                       uint32_t expected_family,
+                                       uf2_load_stats_t *st)
 {
+    uf2_block_t blk;
+    int rc;
+    while ((rc = read_block(&blk)) == 1) {
+        st->total_blocks++;
+        uint32_t off, len;
+        uf2_class_t c = uf2_classify_block(&blk, expected_family,
+                                           region_base, region_end, XIP_BASE,
+                                           &off, &len);
+        switch (c) {
+        case UF2_CLS_PROGRAM: {
+            if (off % FLASH_PAGE_SIZE != 0) return UF2_LOAD_BAD_FILE;
+            uint32_t abs_lo = XIP_BASE + off;
+            uint32_t abs_hi = abs_lo + len;
+            if (abs_lo < st->lowest_addr)  st->lowest_addr  = abs_lo;
+            if (abs_hi > st->highest_addr) st->highest_addr = abs_hi;
+            st->programmed_blocks++;
+            break;
+        }
+        case UF2_CLS_OUT_OF_RANGE:
+            /* A block whose payload would land at or past the region end
+             * means the image is too big for this partition. Refuse rather
+             * than silently truncating. Blocks below region_base (e.g. a UF2
+             * still linked to the bootloader area) stay as a soft skip so we
+             * don't reject files with a stray low block. */
+            if (blk.target_addr >= region_base) return UF2_LOAD_TOO_LARGE;
+            st->skipped_blocks++;
+            break;
+        case UF2_CLS_SKIP:
+            st->skipped_blocks++;
+            break;
+        case UF2_CLS_BAD_MAGIC:
+        case UF2_CLS_BAD_PAYLOAD:
+            return UF2_LOAD_BAD_FILE;
+        }
+    }
+    if (rc < 0)                    return UF2_LOAD_READ_ERROR;
+    if (st->programmed_blocks == 0) return UF2_LOAD_NO_MATCHING_BLOCKS;
+    return UF2_LOAD_OK;
+}
+
+uf2_load_result_t uf2_load_file_ex(const char *name,
+                                   uint32_t region_base,
+                                   uint32_t region_end,
+                                   uint32_t expected_family,
+                                   uf2_load_stats_t *stats,
+                                   uf2_progress_cb progress)
+{
+    /* Defensive: never allow a caller to accidentally erase the bootloader
+     * partition. region_base is externally supplied (e.g. from an aux UF2's
+     * first block's target_addr), so clamp it here. */
+    if (region_base < APP_BASE_ADDR) return UF2_LOAD_TOO_LARGE;
+    if (region_end  > g_app_end_addr) region_end = g_app_end_addr;
+    if (region_end  <= region_base)  return UF2_LOAD_TOO_LARGE;
+
     uf2_load_stats_t st = {0};
     st.lowest_addr = 0xFFFFFFFFu;
 
@@ -76,46 +135,8 @@ uf2_load_result_t uf2_load_file(const char *name,
         return UF2_LOAD_OPEN_FAILED;
 
     /* ---------- Pass 1: validate + measure ---------- */
-    uf2_block_t blk;
-    int rc;
-    while ((rc = read_block(&blk)) == 1) {
-        st.total_blocks++;
-        uint32_t off, len;
-        uf2_class_t c = uf2_classify_block(&blk, EXPECTED_UF2_FAMILY,
-                                           APP_BASE_ADDR, g_app_end_addr, XIP_BASE,
-                                           &off, &len);
-        switch (c) {
-        case UF2_CLS_PROGRAM: {
-            if (off % FLASH_PAGE_SIZE != 0) { storage_close(); return UF2_LOAD_BAD_FILE; }
-            uint32_t abs_lo = XIP_BASE + off;
-            uint32_t abs_hi = abs_lo + len;
-            if (abs_lo < st.lowest_addr)  st.lowest_addr  = abs_lo;
-            if (abs_hi > st.highest_addr) st.highest_addr = abs_hi;
-            st.programmed_blocks++;
-            break;
-        }
-        case UF2_CLS_OUT_OF_RANGE:
-            /* A block whose payload would land at or past the real flash end
-             * means the image is too big for this chip. Refuse rather than
-             * silently truncating. Blocks below APP_BASE_ADDR (e.g. a UF2 still
-             * linked to the bootloader region) stay as a soft skip. */
-            if (blk.target_addr >= APP_BASE_ADDR) {
-                storage_close();
-                return UF2_LOAD_TOO_LARGE;
-            }
-            st.skipped_blocks++;
-            break;
-        case UF2_CLS_SKIP:
-            st.skipped_blocks++;
-            break;
-        case UF2_CLS_BAD_MAGIC:
-        case UF2_CLS_BAD_PAYLOAD:
-            storage_close();
-            return UF2_LOAD_BAD_FILE;
-        }
-    }
-    if (rc < 0)               { storage_close(); return UF2_LOAD_READ_ERROR; }
-    if (st.programmed_blocks == 0) { storage_close(); return UF2_LOAD_NO_MATCHING_BLOCKS; }
+    uf2_load_result_t rr = validate_pass(region_base, region_end, expected_family, &st);
+    if (rr != UF2_LOAD_OK) { storage_close(); return rr; }
 
     /* ---------- Erase exactly the range we will write ----------
      * Loop one sector at a time so the progress callback fires per sector
@@ -140,11 +161,13 @@ uf2_load_result_t uf2_load_file(const char *name,
     /* ---------- Pass 2: program + verify ---------- */
     if (!storage_rewind()) { storage_close(); return UF2_LOAD_READ_ERROR; }
 
+    uf2_block_t blk;
+    int rc;
     uint32_t done = 0;
     while ((rc = read_block(&blk)) == 1) {
         uint32_t off, len;
-        if (uf2_classify_block(&blk, EXPECTED_UF2_FAMILY,
-                               APP_BASE_ADDR, g_app_end_addr, XIP_BASE,
+        if (uf2_classify_block(&blk, expected_family,
+                               region_base, region_end, XIP_BASE,
                                &off, &len) != UF2_CLS_PROGRAM)
             continue;
 
@@ -167,53 +190,42 @@ uf2_load_result_t uf2_load_file(const char *name,
     return UF2_LOAD_OK;
 }
 
-uf2_load_result_t uf2_validate_file(const char *name, uf2_load_stats_t *stats)
+uf2_load_result_t uf2_validate_file_ex(const char *name,
+                                       uint32_t region_base,
+                                       uint32_t region_end,
+                                       uint32_t expected_family,
+                                       uf2_load_stats_t *stats)
 {
+    if (region_base < APP_BASE_ADDR) return UF2_LOAD_TOO_LARGE;
+    if (region_end  > g_app_end_addr) region_end = g_app_end_addr;
+    if (region_end  <= region_base)  return UF2_LOAD_TOO_LARGE;
+
     uf2_load_stats_t st = {0};
     st.lowest_addr = 0xFFFFFFFFu;
 
     if (!storage_open(name))
         return UF2_LOAD_OPEN_FAILED;
 
-    /* Pass 1 only: validate + measure, never touch flash. */
-    uf2_block_t blk;
-    int rc;
-    while ((rc = read_block(&blk)) == 1) {
-        st.total_blocks++;
-        uint32_t off, len;
-        uf2_class_t c = uf2_classify_block(&blk, EXPECTED_UF2_FAMILY,
-                                           APP_BASE_ADDR, g_app_end_addr, XIP_BASE,
-                                           &off, &len);
-        switch (c) {
-        case UF2_CLS_PROGRAM: {
-            if (off % FLASH_PAGE_SIZE != 0) { storage_close(); return UF2_LOAD_BAD_FILE; }
-            uint32_t abs_lo = XIP_BASE + off;
-            uint32_t abs_hi = abs_lo + len;
-            if (abs_lo < st.lowest_addr)  st.lowest_addr  = abs_lo;
-            if (abs_hi > st.highest_addr) st.highest_addr = abs_hi;
-            st.programmed_blocks++;
-            break;
-        }
-        case UF2_CLS_OUT_OF_RANGE:
-            if (blk.target_addr >= APP_BASE_ADDR) {
-                storage_close();
-                return UF2_LOAD_TOO_LARGE;
-            }
-            st.skipped_blocks++;
-            break;
-        case UF2_CLS_SKIP:
-            st.skipped_blocks++;
-            break;
-        case UF2_CLS_BAD_MAGIC:
-        case UF2_CLS_BAD_PAYLOAD:
-            storage_close();
-            return UF2_LOAD_BAD_FILE;
-        }
-    }
+    uf2_load_result_t rr = validate_pass(region_base, region_end, expected_family, &st);
     storage_close();
-    if (rc < 0)                     return UF2_LOAD_READ_ERROR;
-    if (st.programmed_blocks == 0)  return UF2_LOAD_NO_MATCHING_BLOCKS;
+    if (rr != UF2_LOAD_OK) return rr;
 
     if (stats) *stats = st;
     return UF2_LOAD_OK;
+}
+
+uf2_load_result_t uf2_load_file(const char *name,
+                                uf2_load_stats_t *stats,
+                                uf2_progress_cb progress)
+{
+    return uf2_load_file_ex(name,
+                            APP_BASE_ADDR, g_app_end_addr, EXPECTED_UF2_FAMILY,
+                            stats, progress);
+}
+
+uf2_load_result_t uf2_validate_file(const char *name, uf2_load_stats_t *stats)
+{
+    return uf2_validate_file_ex(name,
+                                APP_BASE_ADDR, g_app_end_addr, EXPECTED_UF2_FAMILY,
+                                stats);
 }

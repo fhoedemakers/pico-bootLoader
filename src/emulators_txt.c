@@ -11,11 +11,13 @@
 #define PROG_NAME_MAX    32
 #define IMAGE_KEY_MAX    16
 #define DISPLAY_NAME_MAX 40
+#define AUX_UF2_MAX      64
 
 typedef struct {
     char prog_name[PROG_NAME_MAX];
     char image_key[IMAGE_KEY_MAX];
     char display_name[DISPLAY_NAME_MAX];
+    char aux_uf2[AUX_UF2_MAX];         /* empty if row has no 4th column */
 } row_t;
 
 static row_t s_rows[MAX_ROWS];
@@ -59,10 +61,15 @@ static void parse_line(const char *line)
     if (!s2) return;
     *s2++ = '\0';
 
+    /* Optional 4th field: aux_uf2. If missing, split() leaves it empty. */
+    char *s3 = strchr(s2, ';');
+    if (s3) *s3++ = '\0';
+
     row_t *r = &s_rows[s_row_count];
     copy_field(r->prog_name,    sizeof(r->prog_name),    buf);
     copy_field(r->image_key,    sizeof(r->image_key),    s1);
     copy_field(r->display_name, sizeof(r->display_name), s2);
+    copy_field(r->aux_uf2,      sizeof(r->aux_uf2),      s3 ? s3 : "");
     if (r->prog_name[0]) s_row_count++;
 }
 
@@ -89,10 +96,12 @@ bool emulators_txt_load(const char *path)
 
 bool emulators_txt_lookup(const char *prog_name,
                           char *image_key, size_t key_sz,
-                          char *display_name, size_t name_sz)
+                          char *display_name, size_t name_sz,
+                          char *aux_uf2, size_t aux_sz)
 {
-    if (image_key && key_sz)  image_key[0]    = '\0';
+    if (image_key && key_sz)     image_key[0]    = '\0';
     if (display_name && name_sz) display_name[0] = '\0';
+    if (aux_uf2 && aux_sz)       aux_uf2[0]      = '\0';
 
     if (!prog_name || !*prog_name) return false;
 
@@ -100,6 +109,7 @@ bool emulators_txt_lookup(const char *prog_name,
         if (strcasecmp(s_rows[i].prog_name, prog_name) == 0) {
             if (image_key && key_sz)     copy_field(image_key,    key_sz,  s_rows[i].image_key);
             if (display_name && name_sz) copy_field(display_name, name_sz, s_rows[i].display_name);
+            if (aux_uf2 && aux_sz)       copy_field(aux_uf2,      aux_sz,  s_rows[i].aux_uf2);
             return true;
         }
     }
