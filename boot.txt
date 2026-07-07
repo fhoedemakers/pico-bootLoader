@@ -40,7 +40,10 @@ BASEDIR=/emu
 # whose program_name appears in this file are shown in the picker; the file
 # also supplies the display name and the splash-artwork key for each entry.
 #
-# Format of each row: <program_name>;<image_key>;<display_name>
+# Format of each row: <program_name>;<image_key>;<display_name>[;<aux_uf2>]
+# The optional 4th field names a companion data .uf2 (UF2 family RP2350 DATA)
+# in the same <BASEDIR>/<HW_CONFIG>/ folder, flashed alongside the app
+# (e.g. Doom's WAD).
 #
 # Default: emulators.txt
 #
