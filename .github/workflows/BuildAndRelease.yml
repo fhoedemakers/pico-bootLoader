@@ -13,7 +13,7 @@ on:
 
 # Must match the project() name in CMakeLists.txt
 env:
-    APP_NAME: bootLoader
+    APP_NAME: pico-bootLoader
 
 # Allow this workflow to write back to the repository
 permissions:
@@ -53,41 +53,41 @@ jobs:
                  export PICO_PIO_USB_PATH=/datalocal/Pico-PIO-USB
                  ./buildAll.sh
 
-          - name: Clone and build the emulators (bootloader branch)
-            run: |
-                 export PICO_SDK_PATH=/datalocal/pico/pico-sdk
-                 export PICO_PIO_USB_PATH=/datalocal/Pico-PIO-USB
-                 rm -rf emu-build
-                 mkdir emu-build
-                 # prog_name from emulators.txt -> github repo name
-                 EMULATORS=(
-                     "piconesPlus=pico-infonesPlus"
-                     "picogenesisPlus=pico-genesisPlus"
-                     "picopcePlus=pico-pcePlus"
-                     "PicoPeanutGB=pico-peanutGB"
-                     "picosmsPlus=pico-smsplus"
-                 )
-                 for entry in "${EMULATORS[@]}"; do
-                     repo="${entry##*=}"
-                     echo "=============================="
-                     echo "Building $repo"
-                     echo "=============================="
-                     git clone --branch bootloader --recurse-submodules --depth 1 \
-                         "https://github.com/fhoedemakers/$repo.git" "emu-build/$repo"
-                     (
-                         cd "emu-build/$repo"
-                         chmod +x build*.sh bld.sh pico_shared/bld.sh
-                         ./buildAll.sh
-                     )
-                 done
+        #   - name: Clone and build the emulators (bootloader branch)
+        #     run: |
+        #          export PICO_SDK_PATH=/datalocal/pico/pico-sdk
+        #          export PICO_PIO_USB_PATH=/datalocal/Pico-PIO-USB
+        #          rm -rf emu-build
+        #          mkdir emu-build
+        #          # prog_name from emulators.txt -> github repo name
+        #          EMULATORS=(
+        #              "piconesPlus=pico-infonesPlus"
+        #              "picogenesisPlus=pico-genesisPlus"
+        #              "picopcePlus=pico-pcePlus"
+        #              "PicoPeanutGB=pico-peanutGB"
+        #              "picosmsPlus=pico-smsplus"
+        #          )
+        #          for entry in "${EMULATORS[@]}"; do
+        #              repo="${entry##*=}"
+        #              echo "=============================="
+        #              echo "Building $repo"
+        #              echo "=============================="
+        #              git clone --branch bootloader --recurse-submodules --depth 1 \
+        #                  "https://github.com/fhoedemakers/$repo.git" "emu-build/$repo"
+        #              (
+        #                  cd "emu-build/$repo"
+        #                  chmod +x build*.sh bld.sh pico_shared/bld.sh
+        #                  ./buildAll.sh
+        #              )
+        #          done
 
-          - name: Assemble SD-card release zip
-            run: |
-                 chmod +x .github/scripts/pack_release.sh
-                 rm -rf release-zip
-                 mkdir release-zip
-                 ./.github/scripts/pack_release.sh release-zip emu-build .
-                 (cd release-zip && zip -r ../releases/pico-bootLoader_sdcard.zip emu)
+        #   - name: Assemble SD-card release zip
+        #     run: |
+        #          chmod +x .github/scripts/pack_release.sh
+        #          rm -rf release-zip
+        #          mkdir release-zip
+        #          ./.github/scripts/pack_release.sh release-zip emu-build .
+        #          (cd release-zip && zip -r ../releases/pico-bootLoader_sdcard.zip emu)
 
           - name: List release artifacts
             run: |
@@ -99,4 +99,4 @@ jobs:
             with:
               files: |
                 releases/bootLoader*.uf2
-                releases/pico-bootLoader_sdcard.zip
+#               releases/pico-bootLoader_sdcard.zip
