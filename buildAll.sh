@@ -12,11 +12,13 @@ if ! command -v picotool >/dev/null 2>&1; then
     exit 1
 fi
 
-HWCONFIGS="5 6 7 8 9 11 13 14"
+HWCONFIGS="1 2 5 6 7 8 9 13 14"
 for HWCONFIG in $HWCONFIGS; do
     ./bld.sh -c "$HWCONFIG" -2
 done
-
+# Pico 2 w
+./bld.sh -c 1 -2 -w
+./bld.sh -c 2 -2 -w
 if [ -z "$(ls -A releases)" ]; then
     echo "No UF2 files produced in releases/" >&2
     exit 1
