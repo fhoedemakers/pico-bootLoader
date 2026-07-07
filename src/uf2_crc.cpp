@@ -97,3 +97,64 @@ bool uf2_fingerprint_from_xip(uint32_t base, uint32_t size, uint32_t *out_crc)
     *out_crc = update_crc32(0, (const uint8_t *)(uintptr_t)base, (UINT)size);
     return true;
 }
+
+/* Read the 512-byte block at file index idx; true only on valid UF2 magic. */
+static bool read_block_at(uint32_t idx, uf2_block_t *blk)
+{
+    if (!storage_seek(idx * sizeof(*blk))) return false;
+    uint32_t got = 0;
+    if (!storage_read(blk, sizeof(*blk), &got)) return false;
+    if (got != sizeof(*blk)) return false;
+    if (blk->magic_start0 != UF2_MAGIC_START0) return false;
+    if (blk->magic_start1 != UF2_MAGIC_START1) return false;
+    if (blk->magic_end    != UF2_MAGIC_END)    return false;
+    return true;
+}
+
+bool uf2_extent_from_file_family(const char *path, uint32_t expected_family,
+                                 uint32_t *out_base, uint32_t *out_end)
+{
+    if (!out_base || !out_end) return false;
+    *out_base = *out_end = 0;
+    if (!storage_open(path)) return false;
+
+    uint32_t nblocks = storage_size() / UF2_BLOCK_SIZE;
+    if (nblocks == 0) { storage_close(); return false; }
+
+    /* First program block: at the front, past any header/metadata blocks
+     * (same slack as program_name.c's find_marker). */
+    const uint32_t FRONT_SCAN = 12;
+    uf2_block_t blk;
+    uint32_t base = 0, first_idx = 0;
+    bool front_found = false;
+    for (uint32_t idx = 0; idx < nblocks && idx < FRONT_SCAN; idx++) {
+        if (!read_block_at(idx, &blk)) continue;
+        if (!block_is_program(&blk, expected_family)) continue;
+        base       = blk.target_addr;
+        first_idx  = idx;
+        front_found = true;
+        break;
+    }
+    if (!front_found) { storage_close(); return false; }
+
+    /* Last program block: at the back, allowing a few trailing non-program
+     * blocks (other-family images appended to the same file, etc). */
+    const uint32_t BACK_SCAN = 8;
+    uint32_t end = 0;
+    bool back_found = false;
+    for (uint32_t n = 0; n < BACK_SCAN && n < nblocks; n++) {
+        uint32_t idx = nblocks - 1 - n;
+        if (idx < first_idx) break;
+        if (!read_block_at(idx, &blk)) continue;
+        if (!block_is_program(&blk, expected_family)) continue;
+        end = blk.target_addr + blk.payload_size;
+        back_found = true;
+        break;
+    }
+    storage_close();
+
+    if (!back_found || end <= base) return false;
+    *out_base = base;
+    *out_end  = end;
+    return true;
+}

@@ -45,6 +45,15 @@ bool uf2_fingerprint_from_file_family(const char *path,
 
 bool uf2_fingerprint_from_xip(uint32_t base, uint32_t size, uint32_t *out_crc);
 
+/* Cheap flash-extent probe: reads only the first and last few blocks of the
+ * file (not the whole thing), so it is safe to call for every menu candidate
+ * at boot. Relies on SDK/picotool builds emitting program blocks in ascending
+ * target_addr order -- the same convention program_name.c and the fingerprint
+ * walk above depend on. On success fills [*out_base, *out_end), the absolute
+ * flash range the family's program blocks cover. */
+bool uf2_extent_from_file_family(const char *path, uint32_t expected_family,
+                                 uint32_t *out_base, uint32_t *out_end);
+
 #ifdef __cplusplus
 }
 #endif

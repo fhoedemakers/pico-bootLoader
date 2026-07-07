@@ -98,6 +98,16 @@ void splash() {}
 // Reads the SPI flash JEDEC capacity byte; returns the chip size in bytes.
 namespace Frens { uint storage_get_flash_capacity(); }
 
+// End of usable flash for app images: build-time partition end, clamped to
+// the real chip size reported by the JEDEC ID. Both the loader's runtime
+// bound (set in main) and the menu's size gate (scanEmulators) derive from
+// this, so the picker never lists an image the loader would refuse.
+static uint32_t appFlashEnd()
+{
+    uint32_t cap = Frens::storage_get_flash_capacity();   // cached after first call
+    return (cap >= FLASH_TOTAL_SIZE) ? APP_END_ADDR : (XIP_BASE + cap);
+}
+
 #define CPUFREQ_KHZ 252000
 
 #ifndef HW_CONFIG
@@ -544,6 +554,7 @@ void scanEmulators()
 
         g_emu_seen  = count;
         int skipped = 0;
+        uint32_t flash_end = appFlashEnd();
         for (int i = 0; i < count; i++) {
             SdEmu &e = g_emus[g_emu_count];
             strncpy(e.filename, entries[i].Path, sizeof(e.filename) - 1);
@@ -577,6 +588,32 @@ void scanEmulators()
                     e.filename, e.prog_name);
                 skipped++;
                 continue;
+            }
+
+            // Size gate: hide entries whose image (or companion data image)
+            // extends past the end of the actual flash chip. An extent probe
+            // failure is NOT a skip -- the flash-time validate in
+            // flashAndLaunch() remains the backstop for odd files.
+            uint32_t lo, hi;
+            if (uf2_extent_from_file_family(full, UF2_FAMILY_RP2350_ARM_S,
+                                            &lo, &hi) && hi > flash_end) {
+                LOG("  SKIP %s (image 0x%08X-0x%08X exceeds flash end 0x%08X, %u KB over)",
+                    e.filename, (unsigned)lo, (unsigned)hi, (unsigned)flash_end,
+                    (unsigned)((hi - flash_end + 1023) / 1024));
+                skipped++;
+                continue;
+            }
+            if (e.aux_uf2[0]) {
+                char auxFull[FF_MAX_LFN];
+                snprintf(auxFull, sizeof(auxFull), "%s/%s", g_emuDir, e.aux_uf2);
+                if (uf2_extent_from_file_family(auxFull, UF2_FAMILY_RP2350_DATA,
+                                                &lo, &hi) && hi > flash_end) {
+                    LOG("  SKIP %s (aux %s at 0x%08X-0x%08X exceeds flash end 0x%08X)",
+                        e.filename, e.aux_uf2, (unsigned)lo, (unsigned)hi,
+                        (unsigned)flash_end);
+                    skipped++;
+                    continue;
+                }
             }
             LOG("  [%2d] %-40s  prog_name=\"%s\"  img_key=\"%s\"  display=\"%s\"%s%s",
                 g_emu_count, e.filename, e.prog_name, e.image_key, e.display_name,
@@ -766,8 +803,11 @@ void flashAndLaunch(int idx, bool flashEmu, bool flashAux, const uf2_fingerprint
 
     // Build a short header line naming what's being flashed. The user cares
     // about "Flashing" more than which one; keep the extra line short.
+    // Prefer display_name so this repaint matches the instant acknowledgment
+    // the picker loop already put up at A-press time (no visible text swap).
     const char *line1 = "Flashing";
-    const char *line2 = g_emus[idx].label;
+    const char *line2 = g_emus[idx].display_name[0] ?
+                        g_emus[idx].display_name : g_emus[idx].label;
     const char *line3 = "Do not power off.";
     if (flashAux && !flashEmu) {
         line1 = "Flashing WAD";
@@ -949,12 +989,10 @@ int main()
     // build-time APP_END_ADDR assumes a 16 MB chip (Fruit Jam); on a smaller
     // chip we'd otherwise let an over-large image march past real flash.
     {
-        uint32_t cap = Frens::storage_get_flash_capacity();
-        uint32_t end = (cap >= FLASH_TOTAL_SIZE) ? APP_END_ADDR
-                                                  : (XIP_BASE + cap);
+        uint32_t end = appFlashEnd();
         uf2_loader_set_app_end_addr(end);
         LOG("Flash capacity (JEDEC): %u bytes  app-end clamp: 0x%08X",
-            (unsigned)cap, (unsigned)end);
+            (unsigned)Frens::storage_get_flash_capacity(), (unsigned)end);
     }
     screenBuffer = (charCell *)Frens::f_malloc(screenbufferSize);
     LOG("Allocated %u-byte screenBuffer at %p", (unsigned)screenbufferSize, screenBuffer);
@@ -1261,10 +1299,21 @@ int main()
             LOG("A pressed. sel=%d (%s) flashed_idx=%d emu_drift=%d aux=\"%s\"",
                 sel, g_emus[sel].label, g_flash_idx, (int)g_flash_drift,
                 g_emus[sel].aux_uf2);
-            // Compute both drifts before touching the display -- both walks
-            // read from SD and might take a beat on slow cards, so let the
-            // menu stay live during the check.
             bool emuDrift = (sel != g_flash_idx) || g_flash_drift;
+
+            // Acknowledge the press on screen BEFORE any SD I/O.
+            // computeAuxDrift() CRC-walks a possibly multi-MB aux .uf2 and
+            // flashAndLaunch() pre-flight-validates the whole emulator .uf2;
+            // on a slow card that is several seconds during which a frozen
+            // menu reads as a hang. emuDrift comes from state cached at scan
+            // time, so we already know whether this press flashes or just
+            // launches and can show the right message immediately.
+            const char *dispName = g_emus[sel].display_name[0] ?
+                                   g_emus[sel].display_name : g_emus[sel].label;
+            if (emuDrift) showMessage("Flashing", dispName, "Do not power off.");
+            else          showMessage("Starting", dispName, nullptr);
+            DrawScreen(-1);
+
             uf2_fingerprint_t auxFp;
             AuxState auxState = computeAuxDrift(sel, &auxFp);
             bool flashAux = (auxState == AUX_DRIFT);

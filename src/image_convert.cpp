@@ -826,6 +826,28 @@ void ic_truncate_for_display(const char *name, char *out, int max_chars)
     out[max_chars] = '\0';
 }
 
+// FNV-1a 64-bit over the lowercased basename. FAT names are case-insensitive,
+// so hash them case-folded to match f_stat's semantics.
+uint64_t ic_name_hash(const char *s, size_t n)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t c = (uint8_t)s[i];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+bool ic_hash_contains(const uint64_t *arr, int n, uint64_t h)
+{
+    for (int i = 0; i < n; i++) {
+        if (arr[i] == h) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -845,14 +867,49 @@ int image_convert_batch_dir(const char *dir, uint16_t max_w, uint16_t max_h,
         return -1;
     }
 
+    // Cache presence is matched in memory rather than f_stat-probing per
+    // source: f_stat re-walks the directory from its first sector on every
+    // call, which turns the scan into O(n^2) SD reads -- seconds per boot on
+    // a well-filled screensaver dir even with nothing left to convert. Two
+    // sequential f_readdir passes read the directory data once each instead.
+    const int MAX_CACHE_HASHES = 512;
+    uint64_t *h444 = (uint64_t *)Frens::f_malloc(
+        2u * MAX_CACHE_HASHES * sizeof(uint64_t));
+    if (!h444) {
+        Frens::dumpHeapStats("batch hash alloc failed");
+        Frens::f_free(queue);
+        return -1;
+    }
+    uint64_t *h555 = h444 + MAX_CACHE_HASHES;
+
     DIR d;
     if (f_opendir(&d, dir) != FR_OK) {
+        Frens::f_free(h444);
         Frens::f_free(queue);
         return -1;
     }
 
-    int nqueue = 0;
+    // Pass 1: record which .444 / .555 cache basenames exist.
+    int  n444 = 0, n555 = 0;
+    bool hash_overflow = false;
     FILINFO fno;
+    while (f_readdir(&d, &fno) == FR_OK && fno.fname[0]) {
+        if (fno.fattrib & AM_DIR) continue;
+        const char *name = fno.fname;
+        size_t nn = strlen(name);
+        if (nn <= 4) continue;
+        if (strcasecmp(name + nn - 4, ".444") == 0) {
+            if (n444 >= MAX_CACHE_HASHES) { hash_overflow = true; continue; }
+            h444[n444++] = ic_name_hash(name, nn - 4);
+        } else if (strcasecmp(name + nn - 4, ".555") == 0) {
+            if (n555 >= MAX_CACHE_HASHES) { hash_overflow = true; continue; }
+            h555[n555++] = ic_name_hash(name, nn - 4);
+        }
+    }
+
+    // Pass 2: queue every source that lacks one of its caches.
+    f_readdir(&d, nullptr);   // rewind
+    int nqueue = 0;
     while (f_readdir(&d, &fno) == FR_OK && fno.fname[0]) {
         if (fno.fattrib & AM_DIR) continue;
         const char *name = fno.fname;
@@ -866,16 +923,26 @@ int image_convert_batch_dir(const char *dir, uint16_t max_w, uint16_t max_h,
         size_t base_len = nn - ext_len;
         if (base_len == 0 || base_len >= sizeof(queue[0])) continue;
 
-        char base[FF_MAX_LFN + 1];
-        memcpy(base, name, base_len);
-        base[base_len] = '\0';
-
-        char probe[FF_MAX_LFN + 1];
-        FILINFO fi;
-        snprintf(probe, sizeof(probe), "%s/%s.444", dir, base);
-        bool has_444 = f_stat(probe, &fi) == FR_OK;
-        snprintf(probe, sizeof(probe), "%s/%s.555", dir, base);
-        bool has_555 = f_stat(probe, &fi) == FR_OK;
+        uint64_t h = ic_name_hash(name, base_len);
+        bool has_444 = ic_hash_contains(h444, n444, h);
+        bool has_555 = ic_hash_contains(h555, n555, h);
+        if ((!has_444 || !has_555) && hash_overflow) {
+            // The hash index is partial (dir has > MAX_CACHE_HASHES cache
+            // files); confirm with f_stat before queueing spuriously.
+            char base[FF_MAX_LFN + 1];
+            memcpy(base, name, base_len);
+            base[base_len] = '\0';
+            char probe[FF_MAX_LFN + 1];
+            FILINFO fi;
+            if (!has_444) {
+                snprintf(probe, sizeof(probe), "%s/%s.444", dir, base);
+                has_444 = f_stat(probe, &fi) == FR_OK;
+            }
+            if (!has_555) {
+                snprintf(probe, sizeof(probe), "%s/%s.555", dir, base);
+                has_555 = f_stat(probe, &fi) == FR_OK;
+            }
+        }
         if (has_444 && has_555) continue;
 
         if (nqueue >= MAX_QUEUE) {
@@ -883,11 +950,12 @@ int image_convert_batch_dir(const char *dir, uint16_t max_w, uint16_t max_h,
                    MAX_QUEUE);
             break;
         }
-        strncpy(queue[nqueue], base, sizeof(queue[0]) - 1);
-        queue[nqueue][sizeof(queue[0]) - 1] = '\0';
+        memcpy(queue[nqueue], name, base_len);
+        queue[nqueue][base_len] = '\0';
         nqueue++;
     }
     f_closedir(&d);
+    Frens::f_free(h444);
 
     if (nqueue == 0) {
         printf("[bootLoader] image_convert: no PNG/JPG images need conversion in %s\n", dir);
