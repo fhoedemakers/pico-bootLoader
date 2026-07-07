@@ -1,18 +1,27 @@
 # pico-bootLoader
 
-A resident **graphical bootloader / boot menu** for RP2350 boards. It owns the
-first megabyte of flash, so the bootrom runs it on every power-on. It scans the
-SD card for application `.uf2` files and shows a picker — with a **graphical
-mode** (full-screen artwork per app, slide animation) and a **text mode**
-(plain list). Selecting an app flashes it into the application partition with
-a live progress bar and starts it; if that app is already resident in flash,
-it starts instantly with no flash operation at all.
+**Turns an RP2350 board into a self-contained multi-application device: switch
+between the programs on its SD card from an on-screen menu, without ever
+connecting it to a PC again.**
 
-Any `.uf2` linked for the application partition can be launched. The flagship
-use case is the RP2350 retro-emulator family (pico-infonesPlus,
-pico-genesisPlus, pico-pcePlus, pico-smsplus, pico-peanutGB, …), but the
-loader itself is generic — Doom is on the menu too, and your own application
-joins with a three-line CMake change and one line in a config file (see
+An RP2350 board normally runs a single program — to run a different one you
+have to plug it into a computer, hold BOOTSEL, and copy a new `.uf2` over.
+pico-bootLoader removes that loop. Put all your applications on the board's SD
+card once; from then on, every power-on greets you with a menu. Browse it with
+a game controller or USB keyboard — in a **graphical mode** with full-screen
+artwork per application, or a plain **text mode** — press a button, and the
+selected application is flashed automatically (with a live progress bar) and
+started. If it's the one already in flash, it starts instantly. No PC, no
+BOOTSEL button, no cables.
+
+<!-- TODO: add a photo/screenshot of the graphical picker here -->
+
+It was built so the RP2350 retro-emulator family (pico-infonesPlus,
+pico-genesisPlus, pico-pcePlus, pico-smsplus, pico-peanutGB, …) can live
+together on one console-like device — power on, pick a system, play. But
+nothing about the loader is emulator-specific: any application built for the
+application partition can be on the menu (Doom is), and making your own app
+bootable is a three-line CMake change plus one line in a config file (see
 [Building your own app](#building-your-own-app-for-the-bootloader)).
 
 ## Features
