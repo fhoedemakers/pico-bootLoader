@@ -344,14 +344,3 @@ Its CI builds each emulator from its own repository (on the `bootloader`
 branch) and packs the SD card image, so binaries stay out of git history.
 Until that repo is live, prebuilt sets for several boards are still in this
 repo under [`emu/`](emu/).
-
-## Branches
-
-- `main` — the simple flash-on-every-launch bootloader (no resident-app
-  highlight).
-- `single-slot` — this branch: in-flash highlight, no-flash relaunch,
-  `boot.txt` configuration, artwork auto-conversion, screensaver, aux data
-  images.
-- `slots` — earlier experiment pinning up to 7 apps in distinct 2 MB slots.
-  Preserved for reference; the per-app build matrix it required is why
-  `single-slot` replaced it.
