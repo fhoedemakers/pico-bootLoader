@@ -1,3 +1,13 @@
+# Index / allow-list: only .uf2 files whose embedded program name matches a
+# row below are shown in the picker. Max 16 rows.
+#
+# Format: <program_name>;<image_key>;<display_name>[;<aux_uf2>]
+#   program_name  matched (case-insensitive) against pico_set_program_name()
+#                 read from the .uf2's binary_info; the filename is irrelevant
+#   image_key     menu artwork basename: assets/<image_key>.png|.jpg
+#   display_name  label shown in the picker
+#   aux_uf2       optional companion data .uf2 (UF2 family RP2350 DATA),
+#                 flashed alongside the app (e.g. Doom's WAD)
 picogenesisPlus;md;Sega Genesis/Mega Drive
 piconesPlus;nes;Nintendo Entertainment System
 picopcePlus;pce_cd;Nec Pc Engine
