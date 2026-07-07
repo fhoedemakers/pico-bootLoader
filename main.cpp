@@ -49,6 +49,7 @@
 #include "nespad.h"
 #include "wiipad.h"
 #include "tusb.h"
+#include "image_convert.h"   // C++ linkage; keep out of the extern "C" block
 
 extern "C" {
 #include "boot_config.h"
@@ -1027,6 +1028,21 @@ int main()
                              "but none listed in",
                              g_index_path);
         }
+    }
+
+    // Materialise .444/.555 caches for any PNG/JPG images on the card. On
+    // boards without PSRAM this must happen NOW: the converter needs ~60 KB
+    // of contiguous SRAM heap (dominated by the PNG decoder state) and that
+    // stops being available once the GUI slide buffers (~190 KB) are
+    // allocated below. PSRAM boards keep the existing behaviour -- picker
+    // tiles convert lazily on first view and the screensaver batches at
+    // first activation -- since their scratch lives in lwmem, not here.
+    if (!Frens::isPsramEnabled()) {
+        char asset_sub[96];
+        snprintf(asset_sub, sizeof(asset_sub), "%s/assets", ini.base_dir);
+        image_convert_batch_dir(asset_sub, SCREENWIDTH, SCREENHEIGHT,
+                                /*letterbox=*/true, "Converting menu images");
+        screensaver_convert_batch();
     }
 
     // --- PICKER LOOP --------------------------------------------------------

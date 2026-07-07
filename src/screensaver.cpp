@@ -7,10 +7,8 @@
 #include <strings.h>
 
 #include "FrensHelpers.h"
-#include "FrensFonts.h"
 #include "ff.h"
 #include "image_convert.h"
-#include "progress_bar.h"
 
 // ============================================================================
 // Mode select
@@ -272,187 +270,6 @@ bool load_pixels(const char *name, Sprite &out)
     out.w      = (int16_t)w;
     out.h      = (int16_t)h;
     return true;
-}
-
-// ---------------------------------------------------------------------------
-// PNG/JPEG batch conversion (runs once at screensaver_init)
-// ---------------------------------------------------------------------------
-// For each .png/.jpg/.jpeg file in the screensaver directory that lacks a
-// matching <name>.444 / <name>.555 cache, decode + downscale to fit within
-// SS_MAX_W x SS_MAX_H (no letterbox -- the header stores the actual scaled
-// dims) and write both cache files. A progress bar plus the current filename
-// are drawn directly into the picker framebuffer so the wait is legible.
-// Requires PSRAM; a no-PSRAM path returns immediately.
-
-uint16_t *ss_get_progress_fb()
-{
-#if HSTX
-    return (uint16_t *)hstx_getframebuffer();
-#else
-  #if FRAMEBUFFERISPOSSIBLE
-    if (Frens::isFrameBufferUsed()) return Frens::framebuffer;
-  #endif
-    return nullptr;
-#endif
-}
-
-void ss_fb_draw_text_centered(uint16_t *fb, int y_top, const char *text,
-                              uint16_t fg, uint16_t bg)
-{
-    if (!fb || !text) return;
-    int len = (int)strlen(text);
-    if (len == 0) return;
-    int max_chars = SCREENWIDTH / FONT_CHAR_WIDTH;
-    if (len > max_chars) len = max_chars;
-    int text_w  = len * FONT_CHAR_WIDTH;
-    int x_start = (SCREENWIDTH - text_w) / 2;
-    if (x_start < 0) x_start = 0;
-    for (int row = 0; row < FONT_CHAR_HEIGHT; row++) {
-        int y = y_top + row;
-        if (y < 0 || y >= SCREENHEIGHT) continue;
-        uint16_t *dst = fb + y * SCREENWIDTH + x_start;
-        for (int i = 0; i < len; i++) {
-            unsigned char c = (unsigned char)text[i];
-            if (c < FONT_FIRST_ASCII || c >= FONT_FIRST_ASCII + FONT_N_CHARS) c = '?';
-            char slice = getcharslicefrom8x8font((char)c, row);
-            for (int bit = 0; bit < 8; bit++) {
-                dst[bit] = (slice & 1) ? fg : bg;
-                slice >>= 1;
-            }
-            dst += FONT_CHAR_WIDTH;
-        }
-    }
-}
-
-void ss_truncate_for_display(const char *name, char *out, int max_chars)
-{
-    int n = (int)strlen(name);
-    if (n <= max_chars) { memcpy(out, name, n); out[n] = '\0'; return; }
-    int head = (max_chars - 3) / 2;
-    int tail = max_chars - 3 - head;
-    memcpy(out, name, head);
-    memcpy(out + head, "...", 3);
-    memcpy(out + head + 3, name + n - tail, tail);
-    out[max_chars] = '\0';
-}
-
-void screensaver_convert_batch()
-{
-    if (!Frens::isPsramEnabled()) return;
-
-    // Practical cap on user-supplied files -- above this we log + stop rather
-    // than allocate unbounded scratch. Sprite draw path already caps sprites
-    // at SS_MAX_SPRITES_PSRAM (150).
-    const int MAX_QUEUE = 100;
-    const size_t name_slot = (size_t)(FF_MAX_LFN + 1);
-    char (*queue)[FF_MAX_LFN + 1] = (char (*)[FF_MAX_LFN + 1])
-        Frens::f_malloc((size_t)MAX_QUEUE * name_slot);
-    if (!queue) return;
-
-    DIR dir;
-    if (f_opendir(&dir, s_ss_dir) != FR_OK) {
-        Frens::f_free(queue);
-        return;
-    }
-
-    int nqueue = 0;
-    FILINFO fno;
-    while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0]) {
-        if (fno.fattrib & AM_DIR) continue;
-        const char *name = fno.fname;
-        size_t nn = strlen(name);
-        size_t ext_len = 0;
-        if      (nn > 4 && strcasecmp(name + nn - 4, ".png")  == 0) ext_len = 4;
-        else if (nn > 4 && strcasecmp(name + nn - 4, ".jpg")  == 0) ext_len = 4;
-        else if (nn > 5 && strcasecmp(name + nn - 5, ".jpeg") == 0) ext_len = 5;
-        else continue;
-
-        size_t base_len = nn - ext_len;
-        if (base_len == 0 || base_len >= sizeof(queue[0])) continue;
-
-        char base[FF_MAX_LFN + 1];
-        memcpy(base, name, base_len);
-        base[base_len] = '\0';
-
-        char probe[FF_MAX_LFN + 1];
-        FILINFO fi;
-        snprintf(probe, sizeof(probe), "%s/%s.444", s_ss_dir, base);
-        bool has_444 = f_stat(probe, &fi) == FR_OK;
-        snprintf(probe, sizeof(probe), "%s/%s.555", s_ss_dir, base);
-        bool has_555 = f_stat(probe, &fi) == FR_OK;
-        if (has_444 && has_555) continue;
-
-        if (nqueue >= MAX_QUEUE) {
-            printf("[bootLoader] ss: convert queue full (>%d), skipping rest\n", MAX_QUEUE);
-            break;
-        }
-        strncpy(queue[nqueue], base, sizeof(queue[0]) - 1);
-        queue[nqueue][sizeof(queue[0]) - 1] = '\0';
-        nqueue++;
-    }
-    f_closedir(&dir);
-
-    if (nqueue == 0) {
-        printf("[bootLoader] ss: no PNG/JPG images need conversion in %s\n", s_ss_dir);
-        Frens::f_free(queue);
-        return;
-    }
-
-    printf("[bootLoader] ss: %d image(s) need conversion in %s (max %dx%d)\n",
-           nqueue, s_ss_dir, SS_MAX_W, SS_MAX_H);
-    uint32_t t_batch_start = Frens::time_ms();
-
-    // Progress-bar colours on either backend. Values mirror those the
-    // flashing overlay uses in main.cpp.
-#if HSTX
-    const uint16_t COL_FG     = 0x7FFFu;
-    const uint16_t COL_BG     = 0x0000u;
-    const uint16_t COL_FILL   = 0x03E0u;
-    const uint16_t COL_EMPTY  = 0x2108u;
-    const uint16_t COL_BORDER = 0x7FFFu;
-#else
-    const uint16_t COL_FG     = 0x0FFFu;
-    const uint16_t COL_BG     = 0x0000u;
-    const uint16_t COL_FILL   = 0x00F0u;
-    const uint16_t COL_EMPTY  = 0x0333u;
-    const uint16_t COL_BORDER = 0x0FFFu;
-#endif
-
-    uint16_t *fb = ss_get_progress_fb();
-    if (fb) {
-        for (int i = 0; i < SCREENWIDTH * SCREENHEIGHT; i++) fb[i] = COL_BG;
-        ss_fb_draw_text_centered(fb, 100, "Converting screensaver images", COL_FG, COL_BG);
-    }
-
-    int n_ok = 0;
-    for (int i = 0; i < nqueue; i++) {
-        if (fb) {
-            for (int y = 188; y < 200; y++) {
-                uint16_t *row = fb + y * SCREENWIDTH;
-                for (int x = 0; x < SCREENWIDTH; x++) row[x] = COL_BG;
-            }
-            char shown[FF_MAX_LFN + 1];
-            ss_truncate_for_display(queue[i], shown, SCREENWIDTH / FONT_CHAR_WIDTH);
-            ss_fb_draw_text_centered(fb, 190, shown, COL_FG, COL_BG);
-            progress_bar_draw((uint32_t)i, (uint32_t)nqueue,
-                              COL_FILL, COL_EMPTY, COL_BORDER);
-        }
-
-        printf("[bootLoader] ss: [%d/%d] converting %s\n", i + 1, nqueue, queue[i]);
-        bool ok = image_convert_ensure(s_ss_dir, queue[i], SS_MAX_W, SS_MAX_H, /*letterbox=*/false);
-        if (ok) n_ok++;
-        else    printf("[bootLoader] ss: [%d/%d] %s FAILED\n", i + 1, nqueue, queue[i]);
-
-        if (fb) {
-            progress_bar_draw((uint32_t)(i + 1), (uint32_t)nqueue,
-                              COL_FILL, COL_EMPTY, COL_BORDER);
-        }
-    }
-
-    printf("[bootLoader] ss: batch done in %u ms (%d ok, %d failed)\n",
-           (unsigned)(Frens::time_ms() - t_batch_start), n_ok, nqueue - n_ok);
-
-    Frens::f_free(queue);
 }
 
 // ---------------------------------------------------------------------------
@@ -830,6 +647,12 @@ void screensaver_set_asset_dir(const char *base)
     snprintf(s_ss_dir, sizeof(s_ss_dir), "%s/assets/screensaver", base);
 }
 
+void screensaver_convert_batch(void)
+{
+    image_convert_batch_dir(s_ss_dir, SS_MAX_W, SS_MAX_H, /*letterbox=*/false,
+                            "Converting screensaver images");
+}
+
 void screensaver_set_mode(ss_mode_t m)
 {
     g_ss_mode = m;
@@ -841,8 +664,12 @@ bool screensaver_init(void)
 
     // Materialise .444/.555 caches for any PNG/JPG sources that don't have one
     // yet. Draws a progress bar into the picker framebuffer while it runs.
-    // No-op when no source images exist or PSRAM is unavailable.
-    screensaver_convert_batch();
+    // With PSRAM the converter's scratch lives in lwmem, so running here (GUI
+    // slide buffers alive) is fine. Without PSRAM the ~53 KB decoder state
+    // no longer fits at this point -- main() already ran the batch at boot,
+    // before those buffers claimed the SRAM heap.
+    if (Frens::isPsramEnabled())
+        screensaver_convert_batch();
 
     if (g_ss_mode == SS_MODE_BLOCKS) {
         g_sprite_cap = 8;

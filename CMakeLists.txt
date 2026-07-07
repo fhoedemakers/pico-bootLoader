@@ -34,6 +34,13 @@ endif()
 
 add_definitions(-DNDEBUG)
 
+# A failed malloc must return NULL -- every Frens::f_malloc call site handles
+# that and degrades gracefully (image conversion skips, GUI falls back to text
+# mode). The SDK default panics inside malloc instead, turning a tight-heap
+# situation on no-PSRAM boards into a boot loop. Directory-scoped so it also
+# reaches pico_malloc's check_alloc wherever it is compiled (pico_shared).
+add_definitions(-DPICO_MALLOC_PANIC=0)
+
 # ---------------------------------------------------------------------------
 # TinyUSB family support + Pico SDK init (include family_support.cmake BEFORE
 # pico_sdk_init() so TinyUSB picks up the board-specific PIO USB config).
@@ -83,6 +90,34 @@ add_executable(${projectname}
     src/screensaver.cpp
     src/progress_bar.cpp
     src/image_convert.cpp
+    src/third_party/PNGdec/PNGdec.cpp
+    src/third_party/PNGdec/adler32.c
+    src/third_party/PNGdec/crc32.c
+    src/third_party/PNGdec/infback.c
+    src/third_party/PNGdec/inffast.c
+    src/third_party/PNGdec/inflate.c
+    src/third_party/PNGdec/inftrees.c
+    src/third_party/PNGdec/zutil.c
+    src/third_party/JPEGDEC/JPEGDEC.cpp
+)
+
+# PNGdec / JPEGDEC ship with Arduino-style platform gates; steer them onto
+# the stdlib path (they otherwise pull in <Arduino.h>). Their zlib sources are
+# platform-neutral and don't need this.
+set_source_files_properties(
+    src/third_party/PNGdec/PNGdec.cpp
+    src/third_party/JPEGDEC/JPEGDEC.cpp
+    src/image_convert.cpp
+    PROPERTIES
+    COMPILE_DEFINITIONS "__LINUX__"
+)
+
+# Default PNG_MAX_BUFFERED_PIXELS holds only two 320-wide RGBA source lines
+# (2562 B). Our source cap is 1280x960; two 1280 RGBA lines want ~10240 B.
+# Set project-wide so both PNGdec.cpp (which sizes PNGIMAGE) and image_convert
+# (which does placement-new of PNG) agree.
+target_compile_definitions(${projectname} PRIVATE
+    PNG_MAX_BUFFERED_PIXELS=10752
 )
 
 pico_set_program_name(${projectname} "${projectname}")

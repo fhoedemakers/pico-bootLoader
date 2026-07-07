@@ -35,6 +35,13 @@ void screensaver_set_asset_dir(const char *base);
 /* Choose visual mode. Default is SS_MODE_STARFIELD. */
 void screensaver_set_mode(ss_mode_t m);
 
+/* Convert any PNG/JPG in the screensaver asset dir that lacks its .444/.555
+ * cache (thin wrapper around image_convert_batch_dir with the screensaver's
+ * sprite size limits). screensaver_init() runs this automatically on PSRAM
+ * builds; SRAM-only boards must call it at boot instead, while the ~53 KB
+ * of decoder scratch still fits in the heap (see main.cpp). */
+void screensaver_convert_batch(void);
+
 /* Scan the asset dir, pick random images that fit the size limits, allocate
  * per-sprite RAM, randomise position/velocity. Returns true when at least
  * one sprite was successfully loaded. Idempotent only in the sense of

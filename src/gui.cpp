@@ -140,8 +140,8 @@ bool gui_load_image(const char *image_key, uint16_t *dest)
     if (!dest || !image_key || !*image_key) return false;
 
     // If the .444/.555 cache is missing but a same-named PNG/JPG exists, convert
-    // once. Silently no-ops when PSRAM is unavailable or no source is present.
-    if (Frens::isPsramEnabled()) {
+    // it once (streaming, works on both PSRAM and SRAM-only builds).
+    {
         char asset_sub[FF_MAX_LFN + 1];
         snprintf(asset_sub, sizeof(asset_sub), "%s/assets", s_asset_dir);
         image_convert_ensure(asset_sub, image_key, SCREENWIDTH, SCREENHEIGHT, /*letterbox=*/true);
@@ -191,7 +191,7 @@ bool gui_load_image_half_res(const char *image_key, uint16_t *dest)
 {
     if (!dest || !image_key || !*image_key) return false;
 
-    if (Frens::isPsramEnabled()) {
+    {
         char asset_sub[FF_MAX_LFN + 1];
         snprintf(asset_sub, sizeof(asset_sub), "%s/assets", s_asset_dir);
         image_convert_ensure(asset_sub, image_key, SCREENWIDTH, SCREENHEIGHT, /*letterbox=*/true);
