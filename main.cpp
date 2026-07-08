@@ -196,7 +196,7 @@ void centerText(int row, const char *text, int fg, int bg)
 void drawMenu(int sel, int top, int visible)
 {
     ClearScreen(COL_BG);
-    centerText(0, "P I C O   e m u L o a d e r", COL_FG, COL_BG);
+    centerText(0, "RP2350 bootloader " SWVERSION, COL_FG, COL_BG);
 
     char hdr[SCREEN_COLS + 1];
     snprintf(hdr, sizeof(hdr), "Config %d   %s", HW_CONFIG, g_emuDir);
