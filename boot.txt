@@ -20,7 +20,7 @@
 
 # --- BASEDIR -----------------------------------------------------------------
 # Absolute path (must start with '/') on the SD card where the bootloader
-# looks for everything: emulator .uf2 files, artwork, screensaver assets, and
+# looks for everything: .uf2 files, artwork, screensaver assets, and
 # the .guimode persistence file.
 #
 # Layout expected under BASEDIR:
