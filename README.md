@@ -205,13 +205,13 @@ The flash map (defined in
 in [`src/boot_config.h`](src/boot_config.h)):
 
 ```
-0x10000000  Bootloader          1 MB    <- bootrom always runs this
-0x10100000  Application         15 MB   <- your app is flashed and started here
+0x10000000  Bootloader          512 KB  <- bootrom always runs this
+0x10080000  Application         15.5 MB <- your app is flashed and started here
 0x11000000  end (16 MB flash)
 ```
 
 A normal Pico SDK app links at `0x10000000`; for the bootloader it must be
-relinked to `0x10100000`. Three steps:
+relinked to `0x10080000`. Three steps:
 
 1. **Give it a name** — the loader identifies apps by it:
 
@@ -302,7 +302,7 @@ make -j
 
 Or use the wrapper: `./bld.sh -2 -c <HW_CONFIG>` (add `-w` for Pico 2 W).
 `./buildAll.sh` builds every supported board into `releases/` (requires
-`picotool`). The result is a few hundred KB — well inside the 1 MB
+`picotool`). The result is a few hundred KB — well inside the 512 KB
 bootloader region.
 
 ## How it works
