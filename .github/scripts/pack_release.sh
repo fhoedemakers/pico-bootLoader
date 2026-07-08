@@ -23,13 +23,17 @@ LOADER="$3"
 
 # HW_CONFIG -> board descriptor used in bld.sh-produced filenames.
 # Derived from pico_shared/bld.sh's case statement; RP2350-ARM configs only.
+# Configs 1 and 2 leave USESIMPLEFILENAMES=0, so their filenames carry an extra
+# _<PICO_BOARD> segment (pico2) before _arm; fold it into the descriptor so the
+# ${prog}_${desc}_arm* glob below still matches (the _w variants are filtered out).
 declare -A DESCRIPTOR=(
+    [1]="PimoroniDVI_pico2"
+    [2]="AdafruitDVISD_pico2"
     [5]="AdafruitMetroRP2350"
     [6]="WaveShareRP2350ZeroWithPCB"
     [7]="WaveShareRP2350PiZero"
     [8]="AdafruitFruitJam"
     [9]="WaveShare2350USBA"
-    [11]="RP2350USBA-Old"
     [13]="MurmulatorM2"
     [14]="AdafruitFeatherRP2350_TLV320DAC3100"
 )
