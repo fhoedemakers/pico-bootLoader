@@ -60,7 +60,20 @@ declare -A REPO_OF=(
     [PicoPeanutGB]=pico-peanutGB
     [picosmsPlus]=pico-smsplus
     [picoPacPlus]=pico-pacPlus
+    [doom_tiny]=fruitjam-doom
 )
+
+# fruitjam-doom (Doom!) is a special case. Unlike the emulators above it targets
+# a single board (Adafruit Fruit Jam / HW_CONFIG 8), has no release tags (built
+# from a branch), vendors its own pico-sdk/pico-extras as submodules, and uses a
+# bespoke build script that additionally emits a DATA-family WAD UF2. It is
+# built by _build_doom() instead of the generic bld.sh path.
+DOOM_PROG="doom_tiny"
+DOOM_REPO="fruitjam-doom"
+DOOM_BRANCH="adafruit-fruitjam"
+DOOM_HWCONFIG=8
+DOOM_BUILD_SCRIPT="fruitjam-build-forbootloader.sh"
+DOOM_BUILD_SUBDIR="build_bl_fruitjam/src"
 
 # Supported RP2350-ARM hwconfigs + descriptors from pico_shared/bld.sh case
 # statement. Configs 1, 2, 6, 11 are not Pico-2-only at the board level, but
@@ -247,6 +260,85 @@ else
     info "pico_shared branch: $SHARED_BRANCH"
 fi
 
+# --- Build fruitjam-doom (Doom!) ---------------------------------------------
+# Fruit Jam only. Clones the branch with its vendored SDK/extras submodules and
+# runs fruitjam-build-forbootloader.sh, which emits the app UF2 plus a DATA
+# family WAD UF2 in build_bl_fruitjam/src/. Installs both into emu/<hw>/ and
+# writes the same status contract as build_one_emulator().
+_build_doom() {
+    local prog="$1" status_file="$2" t0="$3"
+    local repo="$DOOM_REPO" branch="$DOOM_BRANCH"
+    local dest="$BUILD_DIR/$repo"
+    local url="https://github.com/${GITHUB_OWNER}/${repo}.git"
+    local elapsed
+
+    # Only meaningful for the Fruit Jam config; skip cleanly for any other.
+    if [ "$HWCONFIG" != "$DOOM_HWCONFIG" ]; then
+        elapsed=$(( SECONDS - t0 ))
+        echo "SKIP:doom_tiny only builds for HW_CONFIG=$DOOM_HWCONFIG (Fruit Jam)|$elapsed" > "$status_file"
+        return 0
+    fi
+
+    hr
+    echo " $prog  ($repo @ branch $branch)  [Fruit Jam / HW_CONFIG $DOOM_HWCONFIG only]"
+    echo " clone -> $dest"
+    hr
+
+    info "[$prog] cleaning previous clone (if any)"
+    rm -rf "$dest"
+
+    info "[$prog] cloning ${repo}@${branch} (recursive: vendored pico-sdk/pico-extras)"
+    if ! git clone --branch "$branch" --recurse-submodules --depth 1 "$url" "$dest"; then
+        elapsed=$(( SECONDS - t0 ))
+        echo "SKIP:clone failed for ${repo}@${branch}|$elapsed" > "$status_file"
+        return 0
+    fi
+
+    set +e
+    (
+        set -e
+        cd "$dest"
+        chmod +x "$DOOM_BUILD_SCRIPT" 2>/dev/null || true
+        info "[$prog] running ./$DOOM_BUILD_SCRIPT"
+        "./$DOOM_BUILD_SCRIPT"
+    )
+    local rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        elapsed=$(( SECONDS - t0 ))
+        echo "SKIP:build failed (rc=$rc)|$elapsed" > "$status_file"
+        return 0
+    fi
+
+    info "[$prog] locating produced UF2s"
+    local src_dir="$dest/$DOOM_BUILD_SUBDIR"
+    local app_uf2="$src_dir/doom_tiny.uf2"
+    if [ ! -f "$app_uf2" ]; then
+        elapsed=$(( SECONDS - t0 ))
+        echo "MISSING|$elapsed" > "$status_file"
+        return 0
+    fi
+
+    local out_dir="$LOADER_DIR/emu/$HWCONFIG"
+    mkdir -p "$out_dir"
+    cp "$app_uf2" "$out_dir/${prog}.uf2"
+    # Companion DATA-family WAD (emulators.txt aux_uf2); the build tags it
+    # *-for-fruitjam.uf2. Install alongside the app so the loader can flash it.
+    shopt -s nullglob
+    local aux
+    for aux in "$src_dir"/*-for-fruitjam.uf2; do
+        cp "$aux" "$out_dir/$(basename "$aux")"
+        info "[$prog] installed aux $(basename "$aux") -> emu/$HWCONFIG/"
+    done
+    shopt -u nullglob
+
+    local bytes
+    bytes=$(stat -c%s "$out_dir/${prog}.uf2")
+    info "[$prog] installed doom_tiny.uf2 -> emu/$HWCONFIG/${prog}.uf2  ($(human_size "$bytes"))"
+    elapsed=$(( SECONDS - t0 ))
+    echo "BUILT:doom_tiny.uf2|$bytes|$elapsed" > "$status_file"
+}
+
 # --- Build one emulator (used both serially and in parallel) -----------------
 # Writes a one-line status to $STATUS_DIR/<prog>.status:
 #   BUILT:<basename>|<bytes>|<elapsed_s>
@@ -254,12 +346,20 @@ fi
 #   MISSING|<elapsed_s>
 build_one_emulator() {
     local prog="$1"
-    local repo="${REPO_OF[$prog]}"
-    local dest="$BUILD_DIR/$repo"
     local status_file="$STATUS_DIR/$prog.status"
-    local url="https://github.com/${GITHUB_OWNER}/${repo}.git"
     local t0 elapsed
     t0=$SECONDS
+
+    # fruitjam-doom builds nothing like the others (single board, vendored SDK,
+    # its own script, extra WAD UF2). Hand it off entirely.
+    if [ "$prog" = "$DOOM_PROG" ]; then
+        _build_doom "$prog" "$status_file" "$t0"
+        return 0
+    fi
+
+    local repo="${REPO_OF[$prog]}"
+    local dest="$BUILD_DIR/$repo"
+    local url="https://github.com/${GITHUB_OWNER}/${repo}.git"
 
     # Resolve the ref to build: the chosen branch, or (in tag mode) this repo's
     # latest release tag — the same selection the release workflow makes with

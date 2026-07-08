@@ -88,6 +88,24 @@ jobs:
                          ./buildAll.sh
                      )
                  done
+                 # fruitjam-doom (Doom!) — Adafruit Fruit Jam only (HW_CONFIG 8).
+                 # No release tags, so build the branch. It vendors its own
+                 # pico-sdk/pico-extras as submodules (hence --recurse-submodules)
+                 # and uses a bespoke script that also emits the DATA-family WAD
+                 # UF2. pack_release.sh picks the outputs up from
+                 # emu-build/fruitjam-doom/build_bl_fruitjam/src/.
+                 DOOM_REPO=fruitjam-doom
+                 DOOM_BRANCH=adafruit-fruitjam
+                 echo "=============================="
+                 echo "Building $DOOM_REPO (branch $DOOM_BRANCH)"
+                 echo "=============================="
+                 git clone --branch "$DOOM_BRANCH" --recurse-submodules --depth 1 \
+                     "https://github.com/fhoedemakers/$DOOM_REPO.git" "emu-build/$DOOM_REPO"
+                 (
+                     cd "emu-build/$DOOM_REPO"
+                     chmod +x fruitjam-build-forbootloader.sh
+                     ./fruitjam-build-forbootloader.sh
+                 )
 
           - name: Assemble SD-card release zip
             run: |
@@ -107,4 +125,4 @@ jobs:
             with:
               files: |
                 releases/bootLoader*.uf2
-#               releases/pico-bootLoader_sdcard.zip
+                releases/pico-bootLoader_sdcard.zip

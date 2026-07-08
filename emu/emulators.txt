@@ -14,4 +14,4 @@ picopcePlus;pce_cd;Nec Pc Engine
 PicoPeanutGB;gb_gbc;Nintendo Game Boy/Game Boy Color
 picosmsPlus;sms_gg;Sega Master System/Game Gear
 picoPacPlus;videopac;Philips Videpac/Magnavox Odessey2
-doom_tiny_usb;doom;Doom!;doom1-whx-for-fruitjam.uf2
+doom_tiny;doom;Doom!;doom1-whx-for-fruitjam.uf2
