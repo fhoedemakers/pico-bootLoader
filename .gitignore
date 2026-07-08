@@ -1,4 +1,6 @@
 *Zone.Identifier
+emu/[0-9]/
+emu/[0-9][0-9]/
 fh.log
 *.nes
 *.fds
