@@ -60,7 +60,7 @@ fi
 
 mkdir -p "$OUTDIR/emu/uf2" "$OUTDIR/emu/assets"
 cp "$LOADER/uf2/emulators.txt" "$OUTDIR/emu/uf2/emulators.txt"
-
+cp "$LOADER/boot.txt" "$OUTDIR/emu/uf2/boot.example.txt"
 shopt -s nullglob
 asset_count=0
 for ext in 444 555; do
