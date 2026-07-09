@@ -85,7 +85,7 @@ DOOM_BUILD_SUBDIR="build_bl_fruitjam/src"
 # Supported RP2350-ARM hwconfigs + descriptors from pico_shared/bld.sh case
 # statement. Configs 1, 2, 6, 11 are not Pico-2-only at the board level, but
 # we always pass -2 to bld.sh so they build for RP2350.
-HWCONFIGS=(1 2 5 6 7 8 9 11 13 14)
+HWCONFIGS=(1 2 5 6 7 8 9 13 14)
 declare -A HW_DESC=(
     [1]="Pimoroni Pico DV Demo Base"
     [2]="Adafruit DVI + MicroSD breakouts / custom PCB"
