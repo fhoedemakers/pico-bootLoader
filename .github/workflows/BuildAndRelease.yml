@@ -66,6 +66,7 @@ jobs:
                      "picopcePlus=pico-pcePlus"
                      "PicoPeanutGB=pico-peanutGB"
                      "picosmsPlus=pico-smsplus"
+                     "picoPacPlus=pico-pacPlus"
                  )
                  for entry in "${EMULATORS[@]}"; do
                      repo="${entry##*=}"
