@@ -94,7 +94,6 @@ declare -A HW_DESC=(
     [7]="WaveShare RP2350-PiZero (PIO USB)"
     [8]="Adafruit Fruit Jam (PIO USB)"
     [9]="WaveShare RP2350-USBA (PIO USB)"
-    [11]="RP2350-USBA OLD pinout (deprecated)"
     [13]="Murmulator M2"
     [14]="Adafruit Feather RP2350 + TLV320DAC3100 (PIO USB)"
 )
