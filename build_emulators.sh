@@ -7,19 +7,21 @@
 # .github/workflows/BuildAndRelease.yml, but interactive and scoped to a single
 # hwconfig + a user-chosen branch for emulator repos and pico_shared. With -t it
 # instead builds each repo's latest release tag (submodules pinned in the tag),
-# matching the release workflow.
+# matching the release workflow. With -m it non-interactively builds each repo's
+# default branch (main or master, resolved per repo from the remote HEAD).
 set -euo pipefail
 
 JOBS=2
 TAG_MODE=0
+MAIN_MODE=0
 HWCONFIG_ARG=""
 usage() {
     cat <<EOF
-Usage: $0 [-c N|all] [-j N] [-t] [-h]
+Usage: $0 [-c N|all] [-j N] [-t] [-m] [-h]
   -c N   build for HW_CONFIG N non-interactively (skip the picker).
   -c all build for every supported HW_CONFIG, unattended. PIO-USB configs are
          skipped automatically when PICO_PIO_USB_PATH is unset/unusable.
-         Combine with -t for a fully hands-off build of all configs.
+         Combine with -t or -m for a fully hands-off build of all configs.
   -j N   build up to N emulators in parallel (default: $JOBS). Each build
          is capped to nproc/N processors so total load stays near nproc.
          With -j 1, output streams live; with -j >1, per-emulator logs are
@@ -28,19 +30,24 @@ Usage: $0 [-c N|all] [-j N] [-t] [-h]
          workflow / pack_release path) instead of asking for branches.
          Submodules — including pico_shared — are left at the revisions
          pinned in that tag.
+  -m     non-interactively build each repo's default branch (main or master,
+         whichever its remote HEAD points at), skipping the branch picker.
+         Mutually exclusive with -t.
   -h     this help
 EOF
 }
-while getopts "c:j:th" opt; do
+while getopts "c:j:tmh" opt; do
     case "$opt" in
         c) HWCONFIG_ARG="$OPTARG" ;;
         j) JOBS="$OPTARG" ;;
         t) TAG_MODE=1 ;;
+        m) MAIN_MODE=1 ;;
         h) usage; exit 0 ;;
         *) usage >&2; exit 1 ;;
     esac
 done
 [[ "$JOBS" =~ ^[0-9]+$ ]] && (( JOBS >= 1 )) || { echo "ERROR: -j must be a positive integer" >&2; exit 1; }
+(( TAG_MODE && MAIN_MODE )) && { echo "ERROR: -t and -m are mutually exclusive" >&2; exit 1; }
 
 cd "$(dirname "$0")"
 LOADER_DIR="$(pwd)"
@@ -99,6 +106,15 @@ warn() { echo "WARN:  $*" >&2; }
 info() { echo "==> $*"; }
 step() { echo "    -> $*"; }
 hr()   { echo "=============================================================="; }
+
+# Resolve a remote's default branch — the ref its HEAD points at (e.g. "main"
+# or "master"). Prints the bare branch name, or nothing if it can't be found.
+# Used by -m so repos that call their default branch "master" still build.
+default_branch_of() {
+    local url="$1"
+    git ls-remote --symref "$url" HEAD 2>/dev/null \
+        | awk '$1 == "ref:" { sub(/^refs\/heads\//, "", $2); print $2; exit }'
+}
 
 human_size() {
     local bytes="$1"
@@ -249,6 +265,20 @@ if (( TAG_MODE )); then
     info "          (including pico_shared) stay at the revisions pinned in the tag."
     EMU_BRANCH="(latest tag per repo)"
     SHARED_BRANCH="(pinned in tag)"
+elif (( MAIN_MODE )); then
+    info "Main mode: building each repo's default branch (main or master),"
+    info "          resolved per repo from the remote's HEAD."
+    # Emulator repos are resolved individually in build_one_emulator (they may
+    # not all use the same default-branch name); this is just a display label.
+    EMU_BRANCH="(default branch per repo)"
+    # pico_shared is a single repo — resolve its default branch now so the
+    # submodule switch and the summaries use a concrete name.
+    SHARED_BRANCH="$(default_branch_of "https://github.com/${GITHUB_OWNER}/pico_shared.git")"
+    if [ -z "$SHARED_BRANCH" ]; then
+        warn "could not resolve pico_shared default branch; falling back to 'main'"
+        SHARED_BRANCH="main"
+    fi
+    info "pico_shared default branch: $SHARED_BRANCH"
 else
     # --- Ask: emulator branch (probed against first repo) --------------------
     PROBE_REPO="${REPO_OF[${PROG_NAMES[0]}]}"
@@ -284,13 +314,24 @@ _build_doom() {
     echo " clone -> $dest"
     hr
 
+    # Drop any artifacts from a previous run up front, so a failed rebuild can
+    # never leave a stale doom_tiny.uf2 (or its WAD) behind in emu/$HWCONFIG/.
+    local out_dir="$LOADER_DIR/emu/$HWCONFIG"
+    mkdir -p "$out_dir"
+    info "[$prog] removing any previous emu/$HWCONFIG/ Doom artifacts"
+    rm -f "$out_dir/${prog}.uf2"
+    shopt -s nullglob
+    local stale
+    for stale in "$out_dir"/*-for-fruitjam.uf2; do rm -f "$stale"; done
+    shopt -u nullglob
+
     info "[$prog] cleaning previous clone (if any)"
     rm -rf "$dest"
 
     info "[$prog] cloning ${repo}@${branch} (recursive: vendored pico-sdk/pico-extras)"
     if ! git clone --branch "$branch" --recurse-submodules --depth 1 "$url" "$dest"; then
         elapsed=$(( SECONDS - t0 ))
-        echo "SKIP:clone failed for ${repo}@${branch}|$elapsed" > "$status_file"
+        echo "FAIL:clone of ${repo}@${branch} failed|$elapsed" > "$status_file"
         return 0
     fi
 
@@ -306,7 +347,7 @@ _build_doom() {
     set -e
     if [ "$rc" -ne 0 ]; then
         elapsed=$(( SECONDS - t0 ))
-        echo "SKIP:build failed (rc=$rc)|$elapsed" > "$status_file"
+        echo "FAIL:build failed (rc=$rc)|$elapsed" > "$status_file"
         return 0
     fi
 
@@ -319,8 +360,6 @@ _build_doom() {
         return 0
     fi
 
-    local out_dir="$LOADER_DIR/emu/$HWCONFIG"
-    mkdir -p "$out_dir"
     cp "$app_uf2" "$out_dir/${prog}.uf2"
     # Companion DATA-family WAD (emulators.txt aux_uf2); the build tags it
     # *-for-fruitjam.uf2. Install alongside the app so the loader can flash it.
@@ -341,9 +380,10 @@ _build_doom() {
 
 # --- Build one emulator (used both serially and in parallel) -----------------
 # Writes a one-line status to $STATUS_DIR/<prog>.status:
-#   BUILT:<basename>|<bytes>|<elapsed_s>
-#   SKIP:<reason>|<elapsed_s>
-#   MISSING|<elapsed_s>
+#   BUILT:<basename>|<bytes>|<elapsed_s>   built OK, UF2 installed
+#   SKIP:<reason>|<elapsed_s>              intentionally not built (branch/config N/A)
+#   FAIL:<reason>|<elapsed_s>              genuine clone/build failure
+#   MISSING|<elapsed_s>                    build ran but produced no UF2
 build_one_emulator() {
     local prog="$1"
     local status_file="$STATUS_DIR/$prog.status"
@@ -375,6 +415,15 @@ build_one_emulator() {
             return 0
         fi
         ref_desc="tag $ref (submodules pinned in tag)"
+    elif (( MAIN_MODE )); then
+        info "[$prog] resolving default branch for $repo"
+        ref=$(default_branch_of "$url")
+        if [ -z "$ref" ]; then
+            elapsed=$(( SECONDS - t0 ))
+            echo "FAIL:could not resolve default branch for $repo|$elapsed" > "$status_file"
+            return 0
+        fi
+        ref_desc="$ref (default branch), pico_shared @ $SHARED_BRANCH"
     else
         ref="$EMU_BRANCH"
         ref_desc="$EMU_BRANCH, pico_shared @ $SHARED_BRANCH"
@@ -385,6 +434,14 @@ build_one_emulator() {
     echo " clone -> $dest"
     echo " using $PER_PROC build processors"
     hr
+
+    # Drop any artifact from a previous run up front, so a failed rebuild can
+    # never leave a stale emu/$HWCONFIG/${prog}.uf2 behind.
+    local dest_uf2="$LOADER_DIR/emu/$HWCONFIG/${prog}.uf2"
+    if [ -f "$dest_uf2" ]; then
+        info "[$prog] removing previous emu/$HWCONFIG/${prog}.uf2"
+        rm -f "$dest_uf2"
+    fi
 
     info "[$prog] cleaning previous clone (if any)"
     rm -rf "$dest"
@@ -397,7 +454,14 @@ build_one_emulator() {
     (( TAG_MODE )) && recurse_flag="--recurse-submodules"
     if ! git clone --branch "$ref" "$recurse_flag" --depth 1 "$url" "$dest"; then
         elapsed=$(( SECONDS - t0 ))
-        echo "SKIP:no '$ref' branch/tag in $repo|$elapsed" > "$status_file"
+        # In -m/-t we resolved $ref from the remote, so a clone failure is a real
+        # error. In interactive branch mode the chosen branch may legitimately
+        # not exist in every repo, so that stays a (non-fatal) skip.
+        if (( MAIN_MODE || TAG_MODE )); then
+            echo "FAIL:clone of '$ref' failed for $repo|$elapsed" > "$status_file"
+        else
+            echo "SKIP:no '$ref' branch in $repo|$elapsed" > "$status_file"
+        fi
         return 0
     fi
 
@@ -441,7 +505,7 @@ build_one_emulator() {
         echo "SKIP:pico_shared lacks branch '$SHARED_BRANCH'|$elapsed" > "$status_file"
         return 0
     elif [ "$rc" -ne 0 ]; then
-        echo "SKIP:build failed (rc=$rc)|$elapsed" > "$status_file"
+        echo "FAIL:build failed (rc=$rc)|$elapsed" > "$status_file"
         return 0
     fi
 
@@ -458,7 +522,6 @@ build_one_emulator() {
         return 0
     fi
     local src_uf2="${matches[0]}"
-    local dest_uf2="$LOADER_DIR/emu/$HWCONFIG/${prog}.uf2"
     cp "$src_uf2" "$dest_uf2"
     local bytes
     bytes=$(stat -c%s "$dest_uf2")
@@ -467,9 +530,21 @@ build_one_emulator() {
     echo "BUILT:$(basename "$src_uf2")|$bytes|$elapsed" > "$status_file"
 }
 
+# On a failed/missing build, surface the tail of that emulator's log so the
+# error is visible without hunting for it. Only parallel mode (JOBS>1) writes a
+# per-emulator log; serial mode already streamed the output live, so there is
+# nothing to replay here.
+show_log_tail() {
+    local prog="$1" logf="${LOGS_DIR:-}/$prog.log"
+    [ -n "${LOGS_DIR:-}" ] && [ -f "$logf" ] || return 0
+    echo "         ---- last 25 lines of $logf ----"
+    tail -n 25 "$logf" | sed 's/^/         > /'
+    echo "         ---- (full log above; keep for details) ----"
+}
+
 # --- Pretty-print a finished emulator using its status file ------------------
-# Reads DONE_COUNT / TOTAL / STATUS_DIR from the calling build_for_hwconfig
-# (visible via bash dynamic scope).
+# Reads DONE_COUNT / TOTAL / STATUS_DIR / LOGS_DIR from the calling
+# build_for_hwconfig (visible via bash dynamic scope).
 report_completion() {
     local prog="$1"
     DONE_COUNT=$(( DONE_COUNT + 1 ))
@@ -493,8 +568,15 @@ report_completion() {
             local elapsed="$rest"
             echo "    [$DONE_COUNT/$TOTAL] SKIP $prog  ($(human_time "$elapsed"))  $reason"
             ;;
+        FAIL:*)
+            local reason="${body#FAIL:}"
+            local elapsed="$rest"
+            echo "    [$DONE_COUNT/$TOTAL] FAIL $prog  ($(human_time "$elapsed"))  $reason"
+            show_log_tail "$prog"
+            ;;
         MISSING)
             echo "    [$DONE_COUNT/$TOTAL] MISS $prog  ($(human_time "$rest"))  build succeeded but no UF2 found"
+            show_log_tail "$prog"
             ;;
         *)
             echo "    [$DONE_COUNT/$TOTAL] ??? $prog  raw='$raw'"
@@ -503,8 +585,8 @@ report_completion() {
 }
 
 # --- Build every emulator for ONE hwconfig -----------------------------------
-# Sets globals LAST_BUILT_COUNT / LAST_TOTAL for the caller's grand summary.
-# Returns 1 if nothing was built for this config, else 0.
+# Sets globals LAST_BUILT_COUNT / LAST_FAILED_COUNT / LAST_TOTAL for the caller's
+# grand summary. Returns 1 if any emulator failed (or nothing built), else 0.
 build_for_hwconfig() {
     HWCONFIG="$1"
     mkdir -p "$BUILD_DIR"
@@ -581,12 +663,12 @@ build_for_hwconfig() {
     local RUN_ELAPSED=$(( SECONDS - RUN_T0 ))
 
     # --- Summary -------------------------------------------------------------
-    local BUILT=() SKIPPED=() MISSING=()
+    local BUILT=() SKIPPED=() FAILED=() MISSING=()
     local status_file raw body rest
     for prog in "${PROG_NAMES[@]}"; do
         status_file="$STATUS_DIR/$prog.status"
         if [ ! -r "$status_file" ]; then
-            MISSING+=("$prog | (no status file — crashed?)")
+            FAILED+=("$prog | (no status file — crashed?)")
             continue
         fi
         raw=$(cat "$status_file")
@@ -601,11 +683,15 @@ build_for_hwconfig() {
                 local reason="${body#SKIP:}" elapsed="$rest"
                 SKIPPED+=("$prog | $(human_time "$elapsed") | $reason")
                 ;;
+            FAIL:*)
+                local reason="${body#FAIL:}" elapsed="$rest"
+                FAILED+=("$prog | $(human_time "$elapsed") | $reason")
+                ;;
             MISSING)
                 MISSING+=("$prog | $(human_time "$rest") | build succeeded but no UF2 found")
                 ;;
             *)
-                MISSING+=("$prog | unknown status: $raw")
+                FAILED+=("$prog | unknown status: $raw")
                 ;;
         esac
     done
@@ -617,6 +703,8 @@ build_for_hwconfig() {
     hr
     echo "Built (${#BUILT[@]}/${TOTAL}):"
     for p in "${BUILT[@]}";   do echo "  + $p"; done
+    echo "Failed (${#FAILED[@]}/${TOTAL}):"
+    for p in "${FAILED[@]}";  do echo "  ! $p"; done
     echo "Skipped (${#SKIPPED[@]}/${TOTAL}):"
     for p in "${SKIPPED[@]}"; do echo "  - $p"; done
     echo "Missing output (${#MISSING[@]}/${TOTAL}):"
@@ -632,7 +720,12 @@ build_for_hwconfig() {
     fi
 
     LAST_BUILT_COUNT=${#BUILT[@]}
+    LAST_FAILED_COUNT=$(( ${#FAILED[@]} + ${#MISSING[@]} ))
     LAST_TOTAL=$TOTAL
+    if (( LAST_FAILED_COUNT > 0 )); then
+        warn "$LAST_FAILED_COUNT emulator(s) failed for HW_CONFIG=$HWCONFIG (see FAIL/MISS above)"
+        return 1
+    fi
     if [ ${#BUILT[@]} -eq 0 ]; then
         warn "no emulators were built for HW_CONFIG=$HWCONFIG"
         return 1
@@ -646,7 +739,11 @@ overall_rc=0
 OVERALL_T0=$SECONDS
 for HW in "${HWCONFIGS_TO_BUILD[@]}"; do
     if build_for_hwconfig "$HW"; then :; else overall_rc=1; fi
-    CONFIG_RESULT[$HW]="${LAST_BUILT_COUNT}/${LAST_TOTAL} built"
+    if (( ${LAST_FAILED_COUNT:-0} > 0 )); then
+        CONFIG_RESULT[$HW]="${LAST_BUILT_COUNT}/${LAST_TOTAL} built, ${LAST_FAILED_COUNT} failed"
+    else
+        CONFIG_RESULT[$HW]="${LAST_BUILT_COUNT}/${LAST_TOTAL} built"
+    fi
 done
 
 if (( MULTI )); then
@@ -655,9 +752,9 @@ if (( MULTI )); then
     echo " Grand summary  (${#HWCONFIGS_TO_BUILD[@]} hwconfig(s), total $(human_time $(( SECONDS - OVERALL_T0 ))))"
     hr
     for HW in "${HWCONFIGS_TO_BUILD[@]}"; do
-        printf "    HW_CONFIG=%-2s  %-12s  %s\n" "$HW" "${CONFIG_RESULT[$HW]}" "${HW_DESC[$HW]}"
+        printf "    HW_CONFIG=%-2s  %-28s  %s\n" "$HW" "${CONFIG_RESULT[$HW]}" "${HW_DESC[$HW]}"
     done
-    (( overall_rc != 0 )) && warn "one or more hwconfigs produced no UF2s"
+    (( overall_rc != 0 )) && warn "one or more hwconfigs had build failures or produced no UF2s"
 fi
 
 exit "$overall_rc"
