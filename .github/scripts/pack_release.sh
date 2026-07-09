@@ -43,7 +43,7 @@ declare -A DESCRIPTOR=(
 )
 
 # Emulators in emulators.txt with no bootloader branch yet.
-SKIP_PROGS=("picoPacPlus")
+SKIP_PROGS=()
 
 # fruitjam-doom (Doom!) is packed specially: it targets only the Fruit Jam board
 # (HW_CONFIG 8), is built outside the generic */releases/ layout, and ships a

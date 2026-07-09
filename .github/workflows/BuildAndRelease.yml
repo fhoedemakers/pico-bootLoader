@@ -124,5 +124,5 @@ jobs:
             if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
             with:
               files: |
-                releases/bootLoader*.uf2
+                releases/pico-bootLoader_*.uf2
                 releases/pico-bootLoader_sdcard.zip

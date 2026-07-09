@@ -1,96 +1,146 @@
 # pico-bootLoader
 
-**Turns an RP2350 board into a self-contained multi-application device: switch
-between the programs on its SD card from an on-screen menu, without ever
-connecting it to a PC again.**
+pico-bootLoader is a bootloader for RP2350 boards. Its primary purpose is to
+host a collection of retro-game emulators and a port of *Doom* on a single
+board and to let the user choose which one to run from an on-screen menu,
+without reconnecting the board to a computer.
 
-An RP2350 board normally runs a single program — to run a different one you
-have to plug it into a computer, hold BOOTSEL, and copy a new `.uf2` over.
-pico-bootLoader removes that loop. Put all your applications on the board's SD
-card once; from then on, every power-on greets you with a menu. Browse it with
-a game controller or USB keyboard — in a **graphical mode** with full-screen
-artwork per application, or a plain **text mode** — press a button, and the
-selected application is flashed automatically (with a live progress bar) and
-started. If it's the one already in flash, it starts instantly. No PC, no
-BOOTSEL button, no cables.
+An RP2350 board normally holds a single program. Running a different one means
+connecting it to a PC, holding BOOTSEL, and copying a new `.uf2` over USB.
+pico-bootLoader replaces that procedure: the applications are placed on the
+board's SD card once, and from then on every power-on presents a menu. The menu
+is navigated with a USB game controller or a USB keyboard, in either a graphical
+mode with full-screen artwork per application or a plain text mode. Selecting an
+entry flashes the corresponding application (if it is not already resident) and
+starts it. A hardware reset or power cycle always returns to the menu.
 
-<!-- TODO: add a photo/screenshot of the graphical picker here -->
+*Doom* is included as a native RP2350 port — it is **not** emulated.
 
-It was built so the RP2350 retro-emulator family (pico-infonesPlus,
-pico-genesisPlus, pico-pcePlus, pico-smsplus, pico-peanutGB, …) can live
-together on one console-like device — power on, pick a system, play. But
-nothing about the loader is emulator-specific: any application built for the
-application partition can be on the menu (Doom is), and making your own app
-bootable is a three-line CMake change plus one line in a config file (see
-[Building your own app](#building-your-own-app-for-the-bootloader)).
+<!-- TODO: add a screenshot of the graphical menu here -->
 
-## Features
+## Bootable applications
 
-- Two menu modes, toggled with **SELECT** and remembered across boots
-  (persisted in `<BASEDIR>/.guimode`).
-- Sub-second launch of the resident app: a VTOR jump, no flash op, no SD I/O.
-- Auto-reflash on drift: if the `.uf2` on SD differs from the resident copy
-  (CRC mismatch — e.g. you dropped a newer build on the card), launching it
-  reflashes first.
-- Optional auxiliary data `.uf2` per app for large read-only payloads (Doom's
-  WAD, for example) flashed alongside the application.
-- Idle screensaver after 30 seconds — two styles, rendered from your own
-  images; any button wakes it.
-- Input devices, all active simultaneously: USB game controllers (HID and
-  XInput), USB keyboard, NES/SNES controller ports, Wii Classic controller.
-- Configurable through an optional [`/boot.txt`](boot.txt) on the SD card.
-- The bootloader only ever *jumps* to applications — it never hands over the
-  boot vector — so any reset or power-cycle always returns to the menu.
+The following emulators and the *Doom* port are supported. Each is built from
+its own repository and identified by the program name embedded in its `.uf2`.
+
+| System | Program name | Source repository |
+|---|---|---|
+| Nintendo Entertainment System | `piconesPlus` | [pico-infonesPlus](https://github.com/fhoedemakers/pico-infonesPlus) |
+| Sega Genesis / Mega Drive | `picogenesisPlus` | [pico-genesisPlus](https://github.com/fhoedemakers/pico-genesisPlus) |
+| NEC PC Engine | `picopcePlus` | [pico-pcePlus](https://github.com/fhoedemakers/pico-pcePlus) |
+| Nintendo Game Boy / Game Boy Color | `PicoPeanutGB` | [pico-peanutGB](https://github.com/fhoedemakers/pico-peanutGB) |
+| Sega Master System / Game Gear | `picosmsPlus` | [pico-smsplus](https://github.com/fhoedemakers/pico-smsplus) |
+| Philips Videopac / Magnavox Odyssey² | `picoPacPlus` | [pico-pacPlus](https://github.com/fhoedemakers/pico-pacPlus) |
+| **Doom** (native port, not emulated) | `doom_tiny` | [fruitjam-doom](https://github.com/fhoedemakers/fruitjam-doom) |
+
+*Doom* currently runs on the Adafruit Fruit Jam (HW_CONFIG 8) only; support for
+further boards is expected to follow. It is distributed as the engine `.uf2`
+together with a companion WAD data image (see [Auxiliary data
+images](#auxiliary-data-images)).
+
+Additional emulators may be added over time.
+
+<!-- TODO: add per-system screenshots here -->
+
+## How it works
+
+The bootloader resides at the start of flash, so the RP2350 bootrom always runs
+it first. On each boot it:
+
+1. Reads the optional [`/boot.txt`](boot.txt), the index file, and scans the
+   board's application folder on the SD card (`<BASEDIR>/<HW_CONFIG>/*.uf2`).
+2. Reads each `.uf2`'s embedded program name from its `binary_info` on disk —
+   nothing is flashed to do this — and reads the resident application's name via
+   XIP.
+3. Filters the files against the index (an allow-list), then displays the menu
+   and pre-selects the entry that matches the application currently in flash.
+4. On selection:
+   - if the chosen application is already resident, it is started with a VTOR
+     jump — no flash operation and no SD I/O, so the launch is near-instant;
+   - otherwise the application is flashed into the application partition, with a
+     progress indicator, and then started;
+   - if the copy on the SD card differs from the resident image (a CRC mismatch,
+     for example after a newer build was placed on the card), it is re-flashed
+     before starting.
+
+The bootloader only ever *jumps* to an application; it never transfers the boot
+vector. Consequently it cannot be locked out: any reset or power cycle returns
+to the menu, and flashing a defective application costs nothing more than
+another selection.
+
+The flash memory map (16 MB flash, Adafruit Fruit Jam shown) is:
+
+```
+0x10000000  Bootloader             512 KB   <- the bootrom always runs this
+0x10080000  Application partition  15.5 MB  <- the selected app is flashed and started here
+0x11000000  end of flash
+```
+
+## Input devices
+
+The menu is operated with USB Human Interface Devices. All connected input
+devices are active simultaneously.
+
+- **USB game controller** — standard USB HID gamepads and XInput controllers.
+- **USB keyboard** — a standard USB HID keyboard.
+
+On boards that provide the necessary wiring, NES/SNES controller ports and a Wii
+Classic controller (over I²C) are also supported and use their own buttons.
+
+| Action | Game controller | USB keyboard |
+|---|---|---|
+| Move through the list (text mode) | D-pad UP / DOWN | ↑ / ↓ |
+| Slide between applications (graphical mode) | D-pad LEFT / RIGHT | ← / → |
+| Launch the selected application | A | Z |
+| Toggle text / graphical mode | SELECT | A |
+| Wake from screensaver | any button | any mapped key |
+
+The chosen menu mode is remembered across boots. Inside a running emulator built
+on the shared framework, **SELECT + START** opens its menu, which offers *Return
+to emulator selection* to reboot back into this menu.
+
+## Getting started
+
+1. **Flash the bootloader.** Download the loader `.uf2` for your board from the
+   [Releases](https://github.com/fhoedemakers/pico-bootLoader/releases) page
+   (see [Supported hardware](#supported-hardware) for the file names). Hold
+   BOOTSEL, connect the board over USB, and copy the `.uf2` onto the
+   `RP2350` drive.
+2. **Prepare the SD card.** Download `pico-bootLoader_sdcard.zip` from the same
+   Releases page and unpack it onto a FAT32- or exFAT-formatted card. The
+   archive contains the emulators, the *Doom* port, the menu artwork, and a
+   sample configuration file. Alternatively, assemble the layout yourself as
+   described in [SD card layout](#sd-card-layout).
+3. **Run it.** Insert the card and power on the board. The menu appears.
+
+The Releases page provides two kinds of download: the per-board bootloader
+`.uf2` binaries and the `pico-bootLoader_sdcard.zip` SD-card archive.
 
 ## Supported hardware
 
-RP2350 only: the partition scheme and UF2 family checks are RP2350-specific.
-Board selection is the compile-time `HW_CONFIG` value (from
-[`pico_shared/BoardConfigs.cmake`](pico_shared/BoardConfigs.cmake)); it also
-names the SD card folder the loader reads apps from (`<BASEDIR>/<HW_CONFIG>/`).
+Only RP2350 boards are supported; the partition scheme and the UF2 family checks
+are RP2350-specific. The board is selected at compile time through the
+`HW_CONFIG` value (defined in
+[`pico_shared/BoardConfigs.cmake`](pico_shared/BoardConfigs.cmake)). The same
+number names the SD-card folder the loader reads applications from
+(`<BASEDIR>/<HW_CONFIG>/`).
 
-| HW_CONFIG | Board | Prebuilt loader binary |
+| HW_CONFIG | Board | Bootloader binary |
 |---|---|---|
 | 1 | Pimoroni Pico DV Demo Base (Pico 2 / Pico 2 W) | `pico-bootLoader_PimoroniDVI_pico2_arm.uf2` / `..._pico2_w_arm.uf2` |
-| 2 | Adafruit DVI breakout + SD breakout (or PCB) (Pico 2 / Pico 2 W) | `pico-bootLoader_AdafruitDVISD_pico2_arm.uf2` / `..._pico2_w_arm.uf2` |
+| 2 | Adafruit DVI breakout + SD breakout (or custom PCB) (Pico 2 / Pico 2 W) | `pico-bootLoader_AdafruitDVISD_pico2_arm.uf2` / `..._pico2_w_arm.uf2` |
 | 5 | Adafruit Metro RP2350 | `pico-bootLoader_AdafruitMetroRP2350_arm.uf2` |
-| 6 | Waveshare RP2350-Zero with PCB | `pico-bootLoader_WaveShareRP2350ZeroWithPCB_arm.uf2` |
+| 6 | Waveshare RP2350-Zero with custom PCB | `pico-bootLoader_WaveShareRP2350ZeroWithPCB_arm.uf2` |
 | 7 | Waveshare RP2350-PiZero | `pico-bootLoader_WaveShareRP2350PiZero_arm_piousb.uf2` |
-| 8 | Adafruit Fruit Jam (HSTX) | `pico-bootLoader_AdafruitFruitJam_arm_piousb.uf2` |
+| 8 | Adafruit Fruit Jam (HSTX video) | `pico-bootLoader_AdafruitFruitJam_arm_piousb.uf2` |
 | 9 | Waveshare RP2350-USB-A | `pico-bootLoader_WaveShare2350USBA_arm_piousb.uf2` |
 | 13 | Murmulator M2 | `pico-bootLoader_MurmulatorM2_arm.uf2` |
 | 14 | Adafruit Feather RP2350 (TLV320DAC3100 audio) | `pico-bootLoader_AdafruitFeatherRP2350_TLV320DAC3100_arm_piousb.uf2` |
 
-Video is DVI/HDMI on all boards: the Fruit Jam (config 8) drives it through
-the RP2350 HSTX peripheral, the others through PicoDVI. One SD card serves
-both kinds — artwork is cached in both pixel formats (see
-[Artwork](#artwork-menu-images-and-screensaver)).
-
-## Quick start
-
-1. Flash the loader for your board (from
-   [Releases](https://github.com/fhoedemakers/pico-bootLoader/releases), or
-   build it yourself — see [Building the bootloader](#building-the-bootloader)):
-   hold BOOTSEL, plug in USB, copy the `.uf2` over.
-2. Prepare a FAT32/exFAT SD card: download the ready-made `sdcard.zip` from the
-   content repository (see [Prebuilt app collection](#prebuilt-app-collection))
-   and unpack it onto the card, or assemble your own layout as described below.
-3. Insert the card, power on. The picker appears.
-
-Controls:
-
-| Action | Gamepad | USB keyboard |
-|---|---|---|
-| Move through the list (text mode) | D-pad UP / DOWN | ↑ / ↓ |
-| Slide between apps (graphical mode) | D-pad LEFT / RIGHT | ← / → |
-| Launch the selected app | A | Z |
-| Toggle text ↔ graphical | SELECT | A |
-| Wake from screensaver | any button | any mapped key |
-
-NES/SNES and Wii Classic controllers use their own SELECT/A buttons; the
-on-screen footer hints adapt to the connected pad. Inside a `pico_shared`
-based app, **SELECT+START** opens its menu, which offers *Return to emulator
-selection* to reboot back into the picker.
+Video output is DVI/HDMI on all boards: the Fruit Jam (HW_CONFIG 8) drives it
+through the RP2350 HSTX peripheral, the others through PicoDVI. A single SD card
+serves both kinds — artwork is cached in both pixel formats (see
+[Artwork](#artwork)).
 
 ## SD card layout
 
@@ -98,44 +148,44 @@ selection* to reboot back into the picker.
 /boot.txt                            optional configuration (defaults apply if absent)
 /emu/                                BASEDIR (default /emu, override in boot.txt)
 /emu/<HW_CONFIG>/*.uf2               applications for this board (e.g. /emu/8/)
-/emu/emulators.txt                   the index / allow-list (filename set by INDEX)
-/emu/assets/<image_key>.png|.jpg     menu artwork, auto-converted on first use
+/emu/emulators.txt                   the index / allow-list (name set by INDEX)
+/emu/assets/<image_key>.png|.jpg     menu artwork, converted on first use
 /emu/assets/screensaver/*.png|.jpg   screensaver images (optional)
-/emu/.guimode                        persisted menu mode (auto-created)
+/emu/.guimode                        persisted menu mode (created automatically)
 ```
 
-Apps live in a subfolder named after the board's `HW_CONFIG` number, so one
-card can carry builds for several boards side by side.
+Applications live in a subfolder named after the board's `HW_CONFIG` number, so
+one card can carry builds for several boards side by side.
 
-## Configuring with `boot.txt`
+### Configuration (`boot.txt`)
 
-An optional file in the **root** of the SD card. If absent, the defaults
-below apply. A commented sample ships in the repo root: [`boot.txt`](boot.txt).
-
-Syntax:
+An optional file in the **root** of the SD card. If it is absent, the defaults
+below apply. A commented sample ships in the repository root:
+[`boot.txt`](boot.txt).
 
 - One `KEY=VALUE` per line; whitespace around `=` and the value is trimmed.
 - Lines starting with `#` or `;` are comments; blank lines are ignored.
 - Keys are case-insensitive. `SCREENSAVER` values are case-insensitive;
   `BASEDIR`/`INDEX` values are filesystem paths and case-sensitive.
-- A malformed file (unknown key, duplicate key, missing `=` or value) shows an
-  on-screen error at boot — fix the file and reset.
+- A malformed file (unknown key, duplicate key, missing `=` or value) produces
+  an on-screen error at boot — correct the file and reset.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `BASEDIR` | `/emu` | Absolute SD path (must start with `/`, max 63 chars) under which everything lives: app folders, the index, artwork, screensaver images. |
-| `INDEX` | `emulators.txt` | Bare filename (no slashes) of the index file inside `BASEDIR`. |
-| `SCREENSAVER` | see note | `STARFIELD` — images fly outward from the screen centre, growing toward the camera. `BLOCKS` — images float and bounce off the edges; the on-screen set is re-picked every 15 s. |
+| `BASEDIR` | `/emu` | Absolute SD path (must start with `/`, max 63 characters) under which everything lives: application folders, the index, artwork, screensaver images. |
+| `INDEX` | `emulators.txt` | Bare file name (no slashes) of the index file inside `BASEDIR`. |
+| `SCREENSAVER` | see note | `STARFIELD` — images fly outward from the screen centre, growing toward the camera. `BLOCKS` — images float and bounce off the edges; the on-screen set is re-picked every 15 s. The screensaver starts after ~30 s of inactivity and any button press exits it. |
 
-> **Screensaver default:** when `/boot.txt` is *absent* the default is
+> **Screensaver default.** When `/boot.txt` is *absent* the default is
 > `STARFIELD`; when the file is *present* but the key is omitted, it is
-> `BLOCKS`. Set the key explicitly if you care which one you get.
+> `BLOCKS`. Set the key explicitly if the choice matters.
 
-## The index file (allow-list)
+### The index file (allow-list)
 
-`<BASEDIR>/<INDEX>` — by default `/emu/emulators.txt` — decides **what
-appears in the menu**. Only `.uf2` files whose embedded program name matches a
-row are listed; anything else in the app folder is ignored. One row per app:
+`<BASEDIR>/<INDEX>` — by default `/emu/emulators.txt` — determines what appears
+in the menu. Only `.uf2` files whose embedded program name matches a row are
+listed; anything else in the application folder is ignored. One row per
+application:
 
 ```
 <program_name>;<image_key>;<display_name>[;<aux_uf2>]
@@ -145,130 +195,147 @@ row are listed; anything else in the app folder is ignored. One row per app:
 # program_name  ; image_key ; display_name              ; optional aux data uf2
 piconesPlus     ; nes       ; Nintendo Entertainment System
 picogenesisPlus ; md        ; Sega Genesis/Mega Drive
-doom_tiny_usb   ; doom      ; Doom!                     ; doom1-whx-for-fruitjam.uf2
+doom_tiny       ; doom      ; Doom!                     ; doom1-whx-for-fruitjam.uf2
 ```
 
-- Fields are separated by `;`, whitespace is trimmed, `#` starts a comment
-  line. Maximum 16 rows.
-- **`program_name`** (max 32 chars) — matched case-insensitively against the
-  name each `.uf2` embeds via `pico_set_program_name()` (read from its
-  `binary_info`, without flashing anything). The `.uf2` *filename* is
-  irrelevant — rename files freely.
-- **`image_key`** (max 16 chars) — basename of the menu artwork:
+- Fields are separated by `;`, whitespace is trimmed, and `#` starts a comment
+  line. A maximum of 16 rows is allowed.
+- **`program_name`** (max 32 characters) — matched case-insensitively against
+  the name each `.uf2` embeds via `pico_set_program_name()` (read from its
+  `binary_info`, without flashing anything). The `.uf2` *file name* is
+  irrelevant; files may be renamed freely.
+- **`image_key`** (max 16 characters) — basename of the menu artwork:
   `<BASEDIR>/assets/<image_key>.png` (or `.jpg`/`.jpeg`).
-- **`display_name`** (max 40 chars) — the label shown in the picker.
-- **`aux_uf2`** (optional, max 64 chars) — filename of a companion **data**
+- **`display_name`** (max 40 characters) — the label shown in the menu.
+- **`aux_uf2`** (optional, max 64 characters) — file name of a companion data
   `.uf2` in the same `<BASEDIR>/<HW_CONFIG>/` folder, flashed alongside the
-  app. Used for large read-only payloads such as Doom's WAD (see
-  [Auxiliary data images](#auxiliary-data-images)).
+  application (see [Auxiliary data images](#auxiliary-data-images)).
 
-## Artwork (menu images and screensaver)
+### Artwork
 
-Drop ordinary images on the card — the bootloader converts them itself:
+Ordinary images are placed on the card and converted by the bootloader itself:
 
-- **Menu artwork:** `<BASEDIR>/assets/<image_key>.png|.jpg|.jpeg`, one per
-  index row, shown full-screen in graphical mode.
-- **Screensaver images:** any `*.png|.jpg|.jpeg` in
-  `<BASEDIR>/assets/screensaver/` (names don't matter; more images = more
-  variety).
+- **Menu artwork** — `<BASEDIR>/assets/<image_key>.png|.jpg|.jpeg`, one per index
+  row, shown full-screen in graphical mode.
+- **Screensaver images** — any `*.png|.jpg|.jpeg` in
+  `<BASEDIR>/assets/screensaver/` (file names do not matter; more images give
+  more variety).
 
 On first use each source image is converted and cached next to it as
-`<name>.444` (RGB444, used by PicoDVI boards) **and** `<name>.555` (RGB555,
-used by HSTX boards) — both are always written, so the same card works in
-every supported board. Never author the `.444`/`.555` files by hand, and if
-you replace a source image under the same name, delete its stale `.444`/`.555`
-files so they regenerate.
-
-Constraints:
+`<name>.444` (RGB444, used by PicoDVI boards) and `<name>.555` (RGB555, used by
+HSTX boards). Both are always written, so the same card works in every supported
+board. The `.444`/`.555` files must not be authored by hand; when a source image
+is replaced under the same name, its stale `.444`/`.555` files should be deleted
+so they regenerate.
 
 | | Menu artwork | Screensaver |
 |---|---|---|
 | Accepted formats | PNG, baseline JPEG | PNG, baseline JPEG |
-| Max source size | 1280 × 960 | 1280 × 960 |
-| Rendered as | scaled down (never up) to fit, letterboxed on black to exactly 320 × 240 | scaled down to fit 80 × 60 |
+| Maximum source size | 1280 × 960 | 1280 × 960 |
+| Rendered as | scaled down (never up) to fit, letterboxed on black to 320 × 240 | scaled down to fit 80 × 60 |
 | Recommendation | 4:3 aspect (e.g. 320 × 240 or 640 × 480) to avoid black bars | small and legible — it moves around the screen |
 
-Not supported (skipped and moved to an `unsupported/` subfolder so they are
-not retried every boot): **progressive** JPEG, **interlaced** PNG, **16-bit**
-PNG, oversized images. Re-export as baseline/non-interlaced 8-bit and copy
+Progressive JPEG, interlaced PNG, 16-bit PNG, and oversized images are not
+supported; they are skipped and moved to an `unsupported/` subfolder so they are
+not retried on every boot. Re-export as baseline/non-interlaced 8-bit and copy
 again.
 
 Boards **with PSRAM** convert images lazily, as they first appear on screen.
-Boards **without PSRAM** convert everything in one batch during boot — the
-first boot after adding images takes noticeably longer; after that the cache
-makes it instant.
+Boards **without PSRAM** convert everything in one batch during boot — the first
+boot after adding images takes noticeably longer, after which the cache makes it
+immediate.
 
-## Building your own app for the bootloader
+## Creating a bootable build of your own application
 
-The flash map (defined in
-[`pico_shared/BootPartition.cmake`](pico_shared/BootPartition.cmake), mirrored
-in [`src/boot_config.h`](src/boot_config.h)):
+Any RP2350 application built for the application partition can appear in the
+menu — it need not be an emulator. Making one bootable requires compiling its
+`.uf2` to the loader's layout and adding it to the SD card.
 
+### 1. Compile the `.uf2` to bootloader format
+
+A normal Pico SDK application links at `0x10000000`. For the bootloader it must
+be relinked into the application partition at `0x10080000`. Three changes to the
+build are required.
+
+**Give the application a name** — the loader identifies applications by it:
+
+```cmake
+pico_set_program_name(${projectname} "my_app")
 ```
-0x10000000  Bootloader          512 KB  <- bootrom always runs this
-0x10080000  Application         15.5 MB <- your app is flashed and started here
-0x11000000  end (16 MB flash)
+
+**Relink into the application partition.** Add the following near the end of the
+`CMakeLists.txt` (after the target exists, before `pico_add_extra_outputs`),
+with `BootPartition.cmake` taken from the
+[`pico_shared`](https://github.com/fhoedemakers/pico_shared) repository:
+
+```cmake
+if(BUILD_FOR_BOOTLOADER)
+    include("pico_shared/BootPartition.cmake")
+    frens_offset_for_bootloader(${projectname})
+endif()
 ```
 
-A normal Pico SDK app links at `0x10000000`; for the bootloader it must be
-relinked to `0x10080000`. Three steps:
+**Build as a secure-Arm RP2350 image** (the default SDK Arm build). The loader
+only flashes UF2 blocks with family `RP2350 ARM_S` (`0xe48bff59`):
 
-1. **Give it a name** — the loader identifies apps by it:
+```sh
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release -DPICO_BOARD=pico2 \
+      -DPICO_PLATFORM=rp2350-arm-s -DBUILD_FOR_BOOTLOADER=ON ..
+make -j
+```
 
-   ```cmake
-   pico_set_program_name(${projectname} "my_app")
-   ```
+Applications based on `pico_shared` can use its build script instead:
+`./bld.sh -2 -c <HW_CONFIG> -b` (the `-b` switch passes
+`-DBUILD_FOR_BOOTLOADER=ON`).
 
-2. **Relink into the app partition.** Add near the end of your
-   `CMakeLists.txt` (after the target exists, before
-   `pico_add_extra_outputs`), with `BootPartition.cmake` taken from the
-   [`pico_shared`](https://github.com/fhoedemakers/pico_shared) repo:
-
-   ```cmake
-   if(BUILD_FOR_BOOTLOADER)
-       include("pico_shared/BootPartition.cmake")
-       frens_offset_for_bootloader(${projectname})
-   endif()
-   ```
-
-3. **Build as a secure-Arm RP2350 image** (the default SDK Arm build — the
-   loader only flashes UF2 blocks with family `RP2350 ARM_S`, `0xe48bff59`):
-
-   ```sh
-   mkdir build && cd build
-   cmake -DCMAKE_BUILD_TYPE=Release -DPICO_BOARD=pico2 \
-         -DPICO_PLATFORM=rp2350-arm-s -DBUILD_FOR_BOOTLOADER=ON ..
-   make -j
-   ```
-
-   Apps based on `pico_shared` can simply use its build script:
-   `./bld.sh -2 -c <HW_CONFIG> -b` (the `-b` switch passes
-   `-DBUILD_FOR_BOOTLOADER=ON`).
-
-Then copy the `.uf2` to `<BASEDIR>/<HW_CONFIG>/` on the card, add an index row
-with its program name, and drop an `assets/<image_key>.png` for the graphical
-menu.
-
-The loader validates before it erases anything: UF2 magic, family ID, page
-alignment, and that every block lands inside the application partition. A
-standalone build still linked at `0x10000000` is rejected on-screen — it can
+The loader validates every image before erasing anything: UF2 magic, family ID,
+page alignment, and that every block lands inside the application partition. A
+standalone build still linked at `0x10000000` is rejected on-screen and can
 never overwrite the bootloader.
+
+### 2. Install it on the SD card
+
+Copy the `.uf2` to `<BASEDIR>/<HW_CONFIG>/` and add a row to the index file
+(`emulators.txt`) with the program name set in step 1, an `image_key`, and a
+display name. See [The index file](#the-index-file-allow-list).
+
+### 3. Add images for the menu and screensaver
+
+- **Menu image** — place `assets/<image_key>.png` (or `.jpg`/`.jpeg`) in
+  `<BASEDIR>/assets/`, using the `image_key` from the index row. It is shown
+  full-screen in graphical mode.
+- **Screensaver images** — place any `*.png|.jpg|.jpeg` in
+  `<BASEDIR>/assets/screensaver/`.
+
+Conversion is automatic; the format and size constraints are those listed under
+[Artwork](#artwork).
+
+### Auxiliary data images
+
+For payloads too large to embed in the application (game data, filesystems), a
+second `.uf2` with family `RP2350 DATA` (`0xe48bff58`) can target free flash
+above the application. Name it in the index row's fourth field and the loader
+flashes it alongside the application, skipping the write when the CRC already
+matches. *Doom* is distributed this way: the engine (`doom_tiny.uf2`, ARM_S)
+plus the WAD (`doom1-whx-for-fruitjam.uf2`, DATA).
 
 ### Detecting the bootloader and returning to the menu
 
-Optional, but friendly: an app can detect it was started by the loader and
-offer a "back to menu" action. The protocol is two watchdog scratch registers,
-which survive `watchdog_reboot()` but clear on power-cycle:
+Optionally, an application can detect that it was started by the loader and offer
+a "return to menu" action. The protocol uses two watchdog scratch registers,
+which survive `watchdog_reboot()` but are cleared on power cycle:
 
-- `scratch[6] == 0xB007ED01` — set by the loader just before starting the app
-  ("you were launched from the bootloader").
-- `scratch[7] = 0xB007BACE` — set by the app, followed by a watchdog reboot
-  ("show me the picker instead of resuming").
+- `scratch[6] == 0xB007ED01` — set by the loader immediately before starting the
+  application ("you were launched from the bootloader").
+- `scratch[7] = 0xB007BACE` — set by the application, followed by a watchdog
+  reboot ("show the menu instead of resuming").
 
-With `pico_shared` this is `Frens::isLaunchedFromBootloader()` and
-`Frens::rebootToBootloader()` ([`pico_shared/FrensHelpers.h`](pico_shared/FrensHelpers.h));
-its SELECT+START menu shows *Return to emulator selection* automatically.
-Without `pico_shared`, the raw equivalent is:
+With `pico_shared` these are `Frens::isLaunchedFromBootloader()` and
+`Frens::rebootToBootloader()`
+([`pico_shared/FrensHelpers.h`](pico_shared/FrensHelpers.h)); its SELECT + START
+menu shows *Return to emulator selection* automatically. Without `pico_shared`,
+the raw equivalent is:
 
 ```c
 #include "hardware/watchdog.h"
@@ -281,16 +348,7 @@ void return_to_menu(void) {
 }
 ```
 
-### Auxiliary data images
-
-For payloads too big to embed (game data, filesystems), a second `.uf2` with
-family `RP2350 DATA` (`0xe48bff58`) can target free flash above the app. Name
-it in the index row's 4th field and the loader flashes it alongside the app,
-skipping the write when the CRC already matches. Doom ships this way: the
-engine (`doom_tiny_usb.uf2`, ARM_S) plus the WAD
-(`doom1-whx-for-fruitjam.uf2`, DATA).
-
-## Building the bootloader
+## Building the bootloader from source
 
 ```sh
 mkdir build && cd build
@@ -300,47 +358,26 @@ make -j
 # -> build/pico-bootLoader.uf2  (flash via BOOTSEL)
 ```
 
-Or use the wrapper: `./bld.sh -2 -c <HW_CONFIG>` (add `-w` for Pico 2 W).
-`./buildAll.sh` builds every supported board into `releases/` (requires
-`picotool`). The result is a few hundred KB — well inside the 512 KB
-bootloader region.
+The wrapper `./bld.sh -2 -c <HW_CONFIG>` performs the same build (add `-w` for
+Pico 2 W). `./buildAll.sh` builds every supported board into `releases/`
+(requires `picotool`). The resulting binary is a few hundred KB, well inside the
+512 KB bootloader region.
 
-## How it works
+To build the emulators and the *Doom* port themselves,
+[`build_emulators.sh`](build_emulators.sh) clones each source repository and
+produces the bootloader-format `.uf2` files, placing them under `emu/<HW_CONFIG>/`.
 
-On every boot the loader:
+## Credits
 
-1. **Resume check** — on PSRAM-less boards an emulator watchdog-reboots to
-   flash a selected ROM; if that flag is set and a valid app is resident, the
-   loader jumps straight back without showing the menu (unless the app
-   explicitly requested the picker via the scratch-register protocol above).
-2. Reads `/boot.txt`, the index file, and scans `<BASEDIR>/<HW_CONFIG>/`.
-3. Reads each `.uf2`'s program name from its `binary_info` on disk (~100 ms
-   per file, nothing is flashed) and the resident app's name via XIP.
-4. Filters against the index, then **highlights and pre-selects** the entry
-   matching the resident app, so a single press of A relaunches it instantly
-   via a VTOR jump.
-5. If the SD copy's CRC differs from the resident image (a newer build was
-   dropped on the card), launching that entry reflashes it first — with a
-   live progress bar — then starts it.
+- Menu and screensaver artwork is taken from **Ducalex — retro-go**
+  ([github.com/ducalex/retro-go](https://github.com/ducalex/retro-go)).
+- The emulator cores and the *Doom* port are the work of their upstream authors;
+  see the repository links under [Bootable
+  applications](#bootable-applications).
+- This project was developed with the assistance of AI
+  (Anthropic Claude / Claude Code).
 
-Because the handoff is a jump and the boot vector is never given away, the
-bootloader can never be locked out: reset or power-cycle always brings the
-menu back, and flashing a broken app costs nothing but another selection.
+## License
 
-On boards without PSRAM the graphical menu keeps the slide animation by
-allocating the incoming image at 160 × 120 and upscaling 2× during the slide,
-then reloading it at full 320 × 240 once it lands — a brief blocky-to-sharp
-snap unique to no-PSRAM hardware.
-
-## Prebuilt app collection
-
-Ready-built emulators (NES, Genesis/Mega Drive, PC Engine, Game Boy, Master
-System/Game Gear, Videopac/Odyssey², …), Doom, and all menu artwork are
-distributed as a ready-to-copy `sdcard.zip` from the companion content
-repository:
-<!-- TODO: update the link once the content repository exists -->
-**[pico-bootLoader-sdcard](https://github.com/fhoedemakers/pico-bootLoader-sdcard)**.
-Its CI builds each emulator from its own repository (on the `bootloader`
-branch) and packs the SD card image, so binaries stay out of git history.
-Until that repo is live, prebuilt sets for several boards are still in this
-repo under [`emu/`](emu/).
+This project is licensed under the GNU General Public License, version 3. See
+the [`LICENSE`](LICENSE) file for the full text.
