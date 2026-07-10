@@ -142,13 +142,14 @@ number names the SD-card folder the loader reads applications from
 | 5 | Adafruit Metro RP2350 | `pico-bootLoader_AdafruitMetroRP2350_arm.uf2` |
 | 6 | Waveshare RP2350-Zero with custom PCB | `pico-bootLoader_WaveShareRP2350ZeroWithPCB_arm.uf2` |
 | 7 | Waveshare RP2350-PiZero | `pico-bootLoader_WaveShareRP2350PiZero_arm_piousb.uf2` |
-| 8 | Adafruit Fruit Jam (HSTX video) | `pico-bootLoader_AdafruitFruitJam_arm_piousb.uf2` |
+| 8 | Adafruit Fruit Jam | `pico-bootLoader_AdafruitFruitJam_arm_piousb.uf2` |
 | 9 | Waveshare RP2350-USB-A | `pico-bootLoader_WaveShare2350USBA_arm_piousb.uf2` |
 | 13 | Murmulator M2 | `pico-bootLoader_MurmulatorM2_arm.uf2` |
 | 14 | Adafruit Feather RP2350 (TLV320DAC3100 audio) | `pico-bootLoader_AdafruitFeatherRP2350_TLV320DAC3100_arm_piousb.uf2` |
 
-Video output is DVI/HDMI on all boards: the Fruit Jam (HW_CONFIG 8) drives it
-through the RP2350 HSTX peripheral, the others through PicoDVI. A single SD card
+Video output is DVI/HDMI on all boards. Boards whose video connector is wired
+to the RP2350 HSTX pins — HW_CONFIG 2, 5, 8, 13 and 14 — drive it through the
+HSTX peripheral; the others use PicoDVI. A single SD card
 serves both kinds — artwork is cached in both pixel formats (see
 [Artwork](#artwork)).
 
