@@ -23,15 +23,15 @@ starts it. A hardware reset or power cycle always returns to the menu.
 The following emulators and the *Doom* port are supported. Each is built from
 its own repository and identified by the program name embedded in its `.uf2`.
 
-| System | Program name | Source repository |
-|---|---|---|
-| Nintendo Entertainment System | `piconesPlus` | [pico-infonesPlus](https://github.com/fhoedemakers/pico-infonesPlus) |
-| Sega Genesis / Mega Drive | `picogenesisPlus` | [pico-genesisPlus](https://github.com/fhoedemakers/pico-genesisPlus) |
-| NEC PC Engine | `picopcePlus` | [pico-pcePlus](https://github.com/fhoedemakers/pico-pcePlus) |
-| Nintendo Game Boy / Game Boy Color | `PicoPeanutGB` | [pico-peanutGB](https://github.com/fhoedemakers/pico-peanutGB) |
-| Sega Master System / Game Gear | `picosmsPlus` | [pico-smsplus](https://github.com/fhoedemakers/pico-smsplus) |
-| Philips Videopac / Magnavox Odyssey² | `picoPacPlus` | [pico-pacPlus](https://github.com/fhoedemakers/pico-pacPlus) |
-| **Doom** (native port, not emulated) | `doom_tiny` | [fruitjam-doom](https://github.com/fhoedemakers/fruitjam-doom) |
+| System | Program name | Source repository | |
+|---|---|---| -- |
+| Nintendo Entertainment System | `piconesPlus` | [pico-infonesPlus](https://github.com/fhoedemakers/pico-infonesPlus) | <img width="1920" height="1080" alt="Screenshot 2026-07-10 12-29-44" src="https://github.com/user-attachments/assets/bcac309a-2766-4547-b28a-a49d6497cf6f" /> |
+| Sega Genesis / Mega Drive | `picogenesisPlus` | [pico-genesisPlus](https://github.com/fhoedemakers/pico-genesisPlus) | <img width="1920" height="1080" alt="Screenshot 2026-07-10 12-29-48" src="https://github.com/user-attachments/assets/2c863df5-fe10-4f25-b750-fc9109de8ca3" /> |
+| NEC PC Engine / PCEngine CD | `picopcePlus` | [pico-pcePlus](https://github.com/fhoedemakers/pico-pcePlus) | <img width="1920" height="1080" alt="Screenshot 2026-07-10 12-29-41" src="https://github.com/user-attachments/assets/7cf5571a-f2d5-4479-98d5-92f21357d855" /> |
+| Nintendo Game Boy / Game Boy Color | `PicoPeanutGB` | [pico-peanutGB](https://github.com/fhoedemakers/pico-peanutGB) |<img width="1920" height="1080" alt="Screenshot 2026-07-10 12-29-33" src="https://github.com/user-attachments/assets/7193f45d-381b-499f-9950-b1d170663a82" />  |
+| Sega Master System / Game Gear | `picosmsPlus` | [pico-smsplus](https://github.com/fhoedemakers/pico-smsplus) |<img width="1920" height="1080" alt="Screenshot 2026-07-10 12-29-33" src="https://github.com/user-attachments/assets/b8aa073d-a1fa-46e8-a583-cd9a6d035748" />  |
+| Philips Videopac / Magnavox Odyssey² | `picoPacPlus` | [pico-pacPlus](https://github.com/fhoedemakers/pico-pacPlus) | <img width="1920" height="1080" alt="Screenshot 2026-07-10 12-38-53" src="https://github.com/user-attachments/assets/413f44e3-9eca-4106-a5a8-0dccb024b286" /> |
+| **Doom** (native port, not emulated) | `doom_tiny` | [fruitjam-doom](https://github.com/fhoedemakers/fruitjam-doom) | <img width="1920" height="1080" alt="Screenshot 2026-07-10 12-29-53" src="https://github.com/user-attachments/assets/2a101f0d-39d4-493e-bf73-4452737f723a" />  |
 
 *Doom* currently runs on the Adafruit Fruit Jam (HW_CONFIG 8) only; support for
 further boards is expected to follow. It is distributed as the engine `.uf2`
@@ -40,7 +40,7 @@ images](#auxiliary-data-images)).
 
 Additional emulators may be added over time.
 
-<!-- TODO: add per-system screenshots here -->
+
 
 ## How it works
 
