@@ -41,6 +41,22 @@ add_definitions(-DNDEBUG)
 # reaches pico_malloc's check_alloc wherever it is compiled (pico_shared).
 add_definitions(-DPICO_MALLOC_PANIC=0)
 
+# This image must fit the 512 KB resident bootloader partition. A -O3 (Release)
+# build overflows it by ~44 KB: on this DVI/PNGdec/JPEGDEC-heavy code -O3's
+# inlining and loop unrolling bloat .text/.rodata ~69 KB past the un-optimized
+# -O0 (Debug) build. Force -Os for the whole image so it fits no matter which
+# CMAKE_BUILD_TYPE is selected (bld.sh forces Release, VSCode defaults to Debug).
+# Directory-scoped and placed before the TinyUSB/SDK includes so it reaches every
+# translation unit; as a trailing compile option the -Os wins over the build
+# type's -O level. Measured flash use, HW_CONFIG 1 / pico2_w:
+#   -O3 108.4% (overflow) | -O2 98.9% (fits, ~6 KB margin) | -Os 94.8% (~27 KB).
+# -Os is safe for the display: the real-time TMDS path is hand-written assembly
+# (pico_lib/dvi/tmds_encode.S, RAM-resident .scratch_x/y) and HSTX encodes in
+# hardware -- neither is affected by the C optimization level. Only per-scanline
+# C orchestration sees -Os, and it has microseconds of slack. Speed is otherwise
+# irrelevant for a menu/loader, so optimizing for size has no downside here.
+add_compile_options(-Os)
+
 # ---------------------------------------------------------------------------
 # TinyUSB family support + Pico SDK init (include family_support.cmake BEFORE
 # pico_sdk_init() so TinyUSB picks up the board-specific PIO USB config).

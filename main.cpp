@@ -966,9 +966,14 @@ int main()
     // audiobufferSize=1024 (not 256): in PicoDVI framebuffer mode the
     // emulators all use 1024; pico-infonesPlus main.cpp explicitly notes
     // "When using framebuffer, AUDIOBUFFERSIZE must be increased to 1024".
-    // 256 caused an intermittent startup deadlock on HW_CONFIG=1 where
-    // core1 hung in the DMA IRQ's waitForLastBlockTransferToStart and
-    // core0 hung in PaceFrames60fps waiting for vsync.
+    // (256 was once blamed for an intermittent startup deadlock here --
+    // core1 wedged in the DVI DMA IRQ, core0 in PaceFrames60fps waiting
+    // for vsync. Real cause found 2026-07: our global -Os left
+    // std::lock_guard & friends out of line in flash, so the DMA IRQ
+    // fetched flash code every scanline and, under core0 XIP/SD traffic,
+    // could miss its control-block reload deadline, silently killing the
+    // DMA chain. Fixed in pico_lib (SpinLockGuard etc.); the buffer size
+    // only shifted the timing.)
     bool sdOk = Frens::initAll(dummyRom, CPUFREQ_KHZ, 0, 0, 1024, false, true);
     LOG("initAll done. SD mounted=%d  PSRAM=%d  framebufferUsed=%d",
         (int)sdOk, (int)Frens::isPsramEnabled(), (int)Frens::isFrameBufferUsed());
