@@ -20,7 +20,6 @@ starts it. A hardware reset or power cycle always returns to the menu.
 
 *Doom* is included as a native RP2350 port — it is **not** emulated.
 
-<!-- TODO: add a screenshot of the graphical menu here -->
 
 ## Bootable applications
 
