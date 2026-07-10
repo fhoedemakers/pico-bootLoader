@@ -27,16 +27,23 @@ its own repository and identified by the program name embedded in its `.uf2`.
 |---|---|---|
 | Nintendo Entertainment System | `piconesPlus` | [pico-infonesPlus](https://github.com/fhoedemakers/pico-infonesPlus) |
 | Sega Genesis / Mega Drive | `picogenesisPlus` | [pico-genesisPlus](https://github.com/fhoedemakers/pico-genesisPlus) |
-| NEC PC Engine | `picopcePlus` | [pico-pcePlus](https://github.com/fhoedemakers/pico-pcePlus) |
+| NEC PC Engine / PCEngine CD | `picopcePlus` | [pico-pcePlus](https://github.com/fhoedemakers/pico-pcePlus) |
 | Nintendo Game Boy / Game Boy Color | `PicoPeanutGB` | [pico-peanutGB](https://github.com/fhoedemakers/pico-peanutGB) |
 | Sega Master System / Game Gear | `picosmsPlus` | [pico-smsplus](https://github.com/fhoedemakers/pico-smsplus) |
 | Philips Videopac / Magnavox Odyssey² | `picoPacPlus` | [pico-pacPlus](https://github.com/fhoedemakers/pico-pacPlus) |
 | **Doom** (native port, not emulated) | `doom_tiny` | [fruitjam-doom](https://github.com/fhoedemakers/fruitjam-doom) |
 
+The following emulators need a bios in `/bios` on SD:
+- *Nintendo Entertainment System* : For Famicom Dsik System games `fds-bios.rom`
+- *Philips Videopac / Magnavox Odyssey²*: `o2rom.bin`
+- *PCEngine CD* : `Super CD-ROM System (Japan) (v3.0).pce` or another variant.
+
 *Doom* currently runs on the Adafruit Fruit Jam (HW_CONFIG 8) only; support for
 further boards is expected to follow. It is distributed as the engine `.uf2`
 together with a companion WAD data image (see [Auxiliary data
 images](#auxiliary-data-images)).
+
+*PCEngine CD* needs PSRAM
 
 Additional emulators may be added over time.
 
