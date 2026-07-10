@@ -53,68 +53,68 @@ jobs:
                  export PICO_PIO_USB_PATH=/datalocal/Pico-PIO-USB
                  ./buildAll.sh
 
-          - name: Clone and build the emulators (latest tag)
-            run: |
-                 export PICO_SDK_PATH=/datalocal/pico/pico-sdk
-                 export PICO_PIO_USB_PATH=/datalocal/Pico-PIO-USB
-                 rm -rf emu-build
-                 mkdir emu-build
-                 # prog_name from emulators.txt -> github repo name
-                 EMULATORS=(
-                     "piconesPlus=pico-infonesPlus"
-                     "picogenesisPlus=pico-genesisPlus"
-                     "picopcePlus=pico-pcePlus"
-                     "PicoPeanutGB=pico-peanutGB"
-                     "picosmsPlus=pico-smsplus"
-                     "picoPacPlus=pico-pacPlus"
-                 )
-                 for entry in "${EMULATORS[@]}"; do
-                     repo="${entry##*=}"
-                     url="https://github.com/fhoedemakers/$repo.git"
-                     # Determine the latest version tag from the remote
-                     tag=$(git ls-remote --tags --refs --sort=-v:refname "$url" \
-                         | head -n1 | sed 's#.*refs/tags/##')
-                     if [ -z "$tag" ]; then
-                         echo "No tags found for $repo" >&2
-                         exit 1
-                     fi
-                     echo "=============================="
-                     echo "Building $repo (tag $tag)"
-                     echo "=============================="
-                     git clone --branch "$tag" --recurse-submodules --depth 1 \
-                         "$url" "emu-build/$repo"
-                     (
-                         cd "emu-build/$repo"
-                         chmod +x build*.sh bld.sh pico_shared/bld.sh
-                         ./buildAll.sh
-                     )
-                 done
-                 # fruitjam-doom (Doom!) — Adafruit Fruit Jam only (HW_CONFIG 8).
-                 # No release tags, so build the branch. It vendors its own
-                 # pico-sdk/pico-extras as submodules (hence --recurse-submodules)
-                 # and uses a bespoke script that also emits the DATA-family WAD
-                 # UF2. pack_release.sh picks the outputs up from
-                 # emu-build/fruitjam-doom/build_bl_fruitjam/src/.
-                 DOOM_REPO=fruitjam-doom
-                 DOOM_BRANCH=adafruit-fruitjam
-                 echo "=============================="
-                 echo "Building $DOOM_REPO (branch $DOOM_BRANCH)"
-                 echo "=============================="
-                 git clone --branch "$DOOM_BRANCH" --recurse-submodules --depth 1 \
-                     "https://github.com/fhoedemakers/$DOOM_REPO.git" "emu-build/$DOOM_REPO"
-                 (
-                     cd "emu-build/$DOOM_REPO"
-                     chmod +x fruitjam-build-forbootloader.sh
-                     ./fruitjam-build-forbootloader.sh
-                 )
+        #   - name: Clone and build the emulators (latest tag)
+        #     run: |
+        #          export PICO_SDK_PATH=/datalocal/pico/pico-sdk
+        #          export PICO_PIO_USB_PATH=/datalocal/Pico-PIO-USB
+        #          rm -rf emu-build
+        #          mkdir emu-build
+        #          # prog_name from emulators.txt -> github repo name
+        #          EMULATORS=(
+        #              "piconesPlus=pico-infonesPlus"
+        #              "picogenesisPlus=pico-genesisPlus"
+        #              "picopcePlus=pico-pcePlus"
+        #              "PicoPeanutGB=pico-peanutGB"
+        #              "picosmsPlus=pico-smsplus"
+        #              "picoPacPlus=pico-pacPlus"
+        #          )
+        #          for entry in "${EMULATORS[@]}"; do
+        #              repo="${entry##*=}"
+        #              url="https://github.com/fhoedemakers/$repo.git"
+        #              # Determine the latest version tag from the remote
+        #              tag=$(git ls-remote --tags --refs --sort=-v:refname "$url" \
+        #                  | head -n1 | sed 's#.*refs/tags/##')
+        #              if [ -z "$tag" ]; then
+        #                  echo "No tags found for $repo" >&2
+        #                  exit 1
+        #              fi
+        #              echo "=============================="
+        #              echo "Building $repo (tag $tag)"
+        #              echo "=============================="
+        #              git clone --branch "$tag" --recurse-submodules --depth 1 \
+        #                  "$url" "emu-build/$repo"
+        #              (
+        #                  cd "emu-build/$repo"
+        #                  chmod +x build*.sh bld.sh pico_shared/bld.sh
+        #                  ./buildAll.sh
+        #              )
+        #          done
+        #          # fruitjam-doom (Doom!) — Adafruit Fruit Jam only (HW_CONFIG 8).
+        #          # No release tags, so build the branch. It vendors its own
+        #          # pico-sdk/pico-extras as submodules (hence --recurse-submodules)
+        #          # and uses a bespoke script that also emits the DATA-family WAD
+        #          # UF2. pack_release.sh picks the outputs up from
+        #          # emu-build/fruitjam-doom/build_bl_fruitjam/src/.
+        #          DOOM_REPO=fruitjam-doom
+        #          DOOM_BRANCH=adafruit-fruitjam
+        #          echo "=============================="
+        #          echo "Building $DOOM_REPO (branch $DOOM_BRANCH)"
+        #          echo "=============================="
+        #          git clone --branch "$DOOM_BRANCH" --recurse-submodules --depth 1 \
+        #              "https://github.com/fhoedemakers/$DOOM_REPO.git" "emu-build/$DOOM_REPO"
+        #          (
+        #              cd "emu-build/$DOOM_REPO"
+        #              chmod +x fruitjam-build-forbootloader.sh
+        #              ./fruitjam-build-forbootloader.sh
+        #          )
 
-          - name: Assemble SD-card release zip
-            run: |
-                 chmod +x .github/scripts/pack_release.sh
-                 rm -rf release-zip
-                 mkdir release-zip
-                 ./.github/scripts/pack_release.sh release-zip emu-build .
-                 (cd release-zip && zip -r ../releases/pico-bootLoader_sdcard.zip emu)
+        #   - name: Assemble SD-card release zip
+        #     run: |
+        #          chmod +x .github/scripts/pack_release.sh
+        #          rm -rf release-zip
+        #          mkdir release-zip
+        #          ./.github/scripts/pack_release.sh release-zip emu-build .
+        #          (cd release-zip && zip -r ../releases/pico-bootLoader_sdcard.zip emu)
 
           - name: List release artifacts
             run: |
