@@ -5,6 +5,10 @@ host a collection of retro-game emulators and a port of *Doom* on a single
 board and to let the user choose which one to run from an on-screen menu,
 without reconnecting the board to a computer.
 
+It is not limited to emulation, though: any RP2350 application can be made
+bootable and added to the menu — see [Creating a bootable build of your own
+application](#creating-a-bootable-build-of-your-own-application).
+
 An RP2350 board normally holds a single program. Running a different one means
 connecting it to a PC, holding BOOTSEL, and copying a new `.uf2` over USB.
 pico-bootLoader replaces that procedure: the applications are placed on the
