@@ -100,6 +100,11 @@ declare -A HW_DESC=(
 # Hwconfigs that imply PIO USB (mirrors pico_shared/bld.sh).
 PIOUSB_CONFIGS=(7 8 9 14)
 
+# prog_name -> space-separated HW_CONFIGs it must NOT be built for.
+declare -A EXCLUDE_HWCONFIGS=(
+    [picogenesisPlus]="7"
+)
+
 die()  { echo "ERROR: $*" >&2; exit 1; }
 warn() { echo "WARN:  $*" >&2; }
 info() { echo "==> $*"; }
@@ -395,6 +400,18 @@ build_one_emulator() {
         _build_doom "$prog" "$status_file" "$t0"
         return 0
     fi
+
+    # Some emulators don't work on certain boards; skip those combinations and
+    # drop any stale UF2 so an excluded config can't keep shipping an old one.
+    local excluded
+    for excluded in ${EXCLUDE_HWCONFIGS[$prog]:-}; do
+        if [ "$excluded" = "$HWCONFIG" ]; then
+            rm -f "$LOADER_DIR/emu/$HWCONFIG/${prog}.uf2"
+            elapsed=$(( SECONDS - t0 ))
+            echo "SKIP:excluded for HW_CONFIG=$HWCONFIG (${HW_DESC[$HWCONFIG]})|$elapsed" > "$status_file"
+            return 0
+        fi
+    done
 
     local repo="${REPO_OF[$prog]}"
     local dest="$BUILD_DIR/$repo"
