@@ -838,7 +838,7 @@ void flashAndLaunch(int idx, bool flashEmu, bool flashAux, const uf2_fingerprint
     // hardfault on anything; the screen goes intentionally dark and the
     // LED heartbeat in flashProgress() carries progress for the user.
     showMessage("Screen will go blank.",
-                "Watch LED for progress.",
+                LED_GPIO_PIN == -1 ? "" :"Watch LED for progress.",
                 "Be patient...");
     DrawScreen(-1);
     idleFor(PICO_DVI_FLASH_NOTICE_MS);
