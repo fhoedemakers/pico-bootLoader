@@ -1,10 +1,10 @@
-# pico_emuLoader - resident .uf2 bootloader frontend for the RP2350 emulators.
+# pico-bootLoader - resident .uf2 bootloader frontend for the RP2350 emulators.
 # IMPORTANT: Use the latest version of tinyusb and pico pio USB.
 # Build/USB structure mirrors pico-infonesPlus (the up-to-date PIO-USB pattern).
 
 cmake_minimum_required(VERSION 3.13)
 
-set(projectname emuLoader)
+set(projectname pico-bootLoader)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -33,6 +33,29 @@ if(NOT PICO_BOARD)
 endif()
 
 add_definitions(-DNDEBUG)
+
+# A failed malloc must return NULL -- every Frens::f_malloc call site handles
+# that and degrades gracefully (image conversion skips, GUI falls back to text
+# mode). The SDK default panics inside malloc instead, turning a tight-heap
+# situation on no-PSRAM boards into a boot loop. Directory-scoped so it also
+# reaches pico_malloc's check_alloc wherever it is compiled (pico_shared).
+add_definitions(-DPICO_MALLOC_PANIC=0)
+
+# This image must fit the 512 KB resident bootloader partition. A -O3 (Release)
+# build overflows it by ~44 KB: on this DVI/PNGdec/JPEGDEC-heavy code -O3's
+# inlining and loop unrolling bloat .text/.rodata ~69 KB past the un-optimized
+# -O0 (Debug) build. Force -Os for the whole image so it fits no matter which
+# CMAKE_BUILD_TYPE is selected (bld.sh forces Release, VSCode defaults to Debug).
+# Directory-scoped and placed before the TinyUSB/SDK includes so it reaches every
+# translation unit; as a trailing compile option the -Os wins over the build
+# type's -O level. Measured flash use, HW_CONFIG 1 / pico2_w:
+#   -O3 108.4% (overflow) | -O2 98.9% (fits, ~6 KB margin) | -Os 94.8% (~27 KB).
+# -Os is safe for the display: the real-time TMDS path is hand-written assembly
+# (pico_lib/dvi/tmds_encode.S, RAM-resident .scratch_x/y) and HSTX encodes in
+# hardware -- neither is affected by the C optimization level. Only per-scanline
+# C orchestration sees -Os, and it has microseconds of slack. Speed is otherwise
+# irrelevant for a menu/loader, so optimizing for size has no downside here.
+add_compile_options(-Os)
 
 # ---------------------------------------------------------------------------
 # TinyUSB family support + Pico SDK init (include family_support.cmake BEFORE
@@ -75,6 +98,42 @@ add_executable(${projectname}
     src/flash_writer.c
     src/app_launch.c
     src/storage_pico.c
+    src/program_name.c
+    src/emulators_txt.c
+    src/sd_boot_ini.c
+    src/uf2_crc.cpp
+    src/gui.cpp
+    src/screensaver.cpp
+    src/progress_bar.cpp
+    src/image_convert.cpp
+    src/third_party/PNGdec/PNGdec.cpp
+    src/third_party/PNGdec/adler32.c
+    src/third_party/PNGdec/crc32.c
+    src/third_party/PNGdec/infback.c
+    src/third_party/PNGdec/inffast.c
+    src/third_party/PNGdec/inflate.c
+    src/third_party/PNGdec/inftrees.c
+    src/third_party/PNGdec/zutil.c
+    src/third_party/JPEGDEC/JPEGDEC.cpp
+)
+
+# PNGdec / JPEGDEC ship with Arduino-style platform gates; steer them onto
+# the stdlib path (they otherwise pull in <Arduino.h>). Their zlib sources are
+# platform-neutral and don't need this.
+set_source_files_properties(
+    src/third_party/PNGdec/PNGdec.cpp
+    src/third_party/JPEGDEC/JPEGDEC.cpp
+    src/image_convert.cpp
+    PROPERTIES
+    COMPILE_DEFINITIONS "__LINUX__"
+)
+
+# Default PNG_MAX_BUFFERED_PIXELS holds only two 320-wide RGBA source lines
+# (2562 B). Our source cap is 1280x960; two 1280 RGBA lines want ~10240 B.
+# Set project-wide so both PNGdec.cpp (which sizes PNGIMAGE) and image_convert
+# (which does placement-new of PNG) agree.
+target_compile_definitions(${projectname} PRIVATE
+    PNG_MAX_BUFFERED_PIXELS=10752
 )
 
 pico_set_program_name(${projectname} "${projectname}")

@@ -1,5 +1,5 @@
 /*
- * main.cpp - Pico emuLoader: a resident .uf2 bootloader frontend for the
+ * main.cpp - Pico bootLoader: a resident .uf2 bootloader frontend for the
  *            RP2350 retro-emulator family (shared pico_shared framework).
  *
  * Boot flow:
@@ -9,16 +9,25 @@
  *      back into the already-flashed emulator instead of showing the menu.
  *      A physical reset / power-cycle does NOT set that flag, so it lands here
  *      and shows the menu -- exactly the requested behaviour.
- *   3. Otherwise: init display/SD/USB via the framework, list the emulators
- *      available for this board config under /emu/<HW_CONFIG>/, and show a
- *      picker. Pressing B flashes the chosen emulator into the application
- *      partition and jumps to it.
+ *   3. Otherwise: init display/SD/USB via the framework, list the emulator
+ *      .uf2 files under <BASEDIR>/<HW_CONFIG>/ (BASEDIR defaults to /emu;
+ *      overridable via an optional /boot.txt INI on the SD root), identify
+ *      which one is currently in the application partition by matching
+ *      binary_info program names, and show a picker.
+ *
+ * Picker semantics (single-slot model):
+ *   - One flat list of every .uf2 on SD.
+ *   - The entry whose program_name matches the in-flash image is highlighted
+ *     as "in flash" (and selected by default).
+ *   - Pressing B on the in-flash entry: launch it directly (no flash, VTOR
+ *     jump). Pressing B on any other entry: show a "Flashing..." screen for
+ *     a brief moment so the user reads it, then flash and launch.
  *
  * The flash map (bootloader region + app partition) lives in
  * pico_shared/BootPartition.cmake and src/boot_config.h (single source).
  *
  * Serial output: all diagnostics go to UART (PICO_DEFAULT_UART, pins 44/45 on
- * Fruit Jam, 115200-8N1). Tag every line with "[emuLoader] " so they stand out
+ * Fruit Jam, 115200-8N1). Tag every line with "[bootLoader] " so they stand out
  * when the freshly-launched emulator starts speaking.
  */
 #include <cstdio>
@@ -37,14 +46,42 @@
 #include "menu.h"
 #include "settings.h"
 #include "gamepad.h"
+#include "nespad.h"
+#include "wiipad.h"
 #include "tusb.h"
+#include "image_convert.h"   // C++ linkage; keep out of the extern "C" block
 
 extern "C" {
 #include "boot_config.h"
 #include "uf2_loader.h"
+#include "uf2_format.h"
 #include "app_launch.h"
 #include "storage.h"
+#include "program_name.h"
+#include "emulators_txt.h"
+#include "uf2_crc.h"
+#include "gui.h"
+#include "screensaver.h"
+#include "progress_bar.h"
+#include "sd_boot_ini.h"
+#include <hardware/divider.h>
 }
+
+// Progress-bar colours, picked at compile time to match whichever 16-bit
+// pixel format the active backend uses. Hard-coded so the SRAM-resident
+// flashProgress callback never has to dereference a palette in flash.
+//   HSTX  : RGB555 (5-5-5-1, low bit ignored)
+//   !HSTX : RGB444 packed as 0x0RGB (this codebase's PicoDVI encoding,
+//           see CC() in pico_shared/menu.cpp)
+#if HSTX
+#define PB_COL_BORDER 0x0000u   // black
+#define PB_COL_EMPTY  0x7FFFu   // white (matches menu background)
+#define PB_COL_FILL   0x03E0u   // pure green
+#else
+#define PB_COL_BORDER 0x0000u   // black
+#define PB_COL_EMPTY  0x0FFFu   // white
+#define PB_COL_FILL   0x00F0u   // pure green
+#endif
 
 // DrawScreen() has external linkage in pico_shared/menu.cpp but is not declared
 // in menu.h. It renders the 40x30 charcell screenBuffer into the active video
@@ -57,6 +94,20 @@ void DrawScreen(int selectedRow, int w = 0, int h = 0, uint16_t *imagebuffer = n
 // the linker a harmless definition.
 void splash() {}
 
+// Defined in pico_shared/FrensHelpers.cpp but not declared in FrensHelpers.h.
+// Reads the SPI flash JEDEC capacity byte; returns the chip size in bytes.
+namespace Frens { uint storage_get_flash_capacity(); }
+
+// End of usable flash for app images: build-time partition end, clamped to
+// the real chip size reported by the JEDEC ID. Both the loader's runtime
+// bound (set in main) and the menu's size gate (scanEmulators) derive from
+// this, so the picker never lists an image the loader would refuse.
+static uint32_t appFlashEnd()
+{
+    uint32_t cap = Frens::storage_get_flash_capacity();   // cached after first call
+    return (cap >= FLASH_TOTAL_SIZE) ? APP_END_ADDR : (XIP_BASE + cap);
+}
+
 #define CPUFREQ_KHZ 252000
 
 #ifndef HW_CONFIG
@@ -66,19 +117,57 @@ void splash() {}
 #define COL_FG  DEFAULT_FGCOLOR   // dark text
 #define COL_BG  DEFAULT_BGCOLOR   // light background
 
-// Every diagnostic line gets the same prefix so it's easy to grep for
-// bootloader output across the emulator's own chatty stdout.
-#define LOG(fmt, ...) printf("[emuLoader] " fmt "\n", ##__VA_ARGS__)
+// Brief on-screen pause (ms) so the "Flashing..." notice registers before
+// the bar starts moving. The bar itself is now live during the erase so we
+// don't need a long read-time -- just enough to acknowledge the press.
+#define FLASH_NOTICE_MS  500
+
+// On picoDVI we have to stop core1 before flashing (see flashAndLaunch
+// comment), so the screen goes dark for the whole flash op. Hold the
+// "screen will go blank" notice on screen long enough for the user to
+// actually read it.
+#define PICO_DVI_FLASH_NOTICE_MS  3500
+
+#define LOG(fmt, ...) printf("[bootLoader] " fmt "\n", ##__VA_ARGS__)
 
 namespace {
 
-char g_emuDir[32];                       // "/emu/8"
-char g_labels[64][ROMLISTER_MAXPATH];    // friendly names parallel to entries
+#define PROG_NAME_MAX 32
+#define IMAGE_KEY_MAX 16
+#define DISPLAY_NAME_MAX 40
+#define AUX_UF2_MAX 64
 
-// Derive a friendly label from a UF2 filename:
-//   "picogenesisPlus_AdafruitFruitJam_arm_piousb.uf2" -> "genesisPlus"
-//   "PicoPeanutGB_AdafruitFruitJam_arm_piousb.uf2"    -> "PeanutGB"
-void makeLabel(const char *fname, char *out, size_t n)
+struct SdEmu {
+    char filename[ROMLISTER_MAXPATH];        // basename
+    char label[PROG_NAME_MAX];               // shown in the menu (program_name preferred)
+    char prog_name[PROG_NAME_MAX];           // binary_info match key ("" if not extractable)
+    char image_key[IMAGE_KEY_MAX];           // emulators.txt column 2 ("md", "nes", ...)
+    char display_name[DISPLAY_NAME_MAX];     // emulators.txt column 3 (human-readable)
+    char aux_uf2[AUX_UF2_MAX];               // emulators.txt column 4 (basename of aux .uf2; "" = none)
+};
+
+char  g_emuDir[80];                   // "<BASEDIR>/<HW_CONFIG>"
+SdEmu g_emus[32];
+int   g_emu_count = 0;                // entries actually shown (matched in emulators.txt)
+int   g_emu_seen  = 0;                // total .uf2 files found in g_emuDir, pre-filter
+char  g_flash_prog_name[PROG_NAME_MAX] = {0};   // currently-flashed image's program name
+int   g_flash_idx = -1;                         // index into g_emus, or -1 if none matches
+// True when the in-flash image has the same program_name as g_emus[g_flash_idx]
+// but its CRC32 differs from the SD .uf2 -- meaning the user dropped a newer
+// build onto the card. Pressing A on that entry takes the flash path instead
+// of the in-flash launch.
+bool  g_flash_drift = false;
+
+// Paths built at boot from /boot.txt (or its defaults). Consumed everywhere
+// the old EMULATORS_TXT_PATH / GUI_MODE_PATH macros used to be.
+char  g_index_path[144];              // "<BASEDIR>/<INDEX>"
+char  g_guimode_path[80];             // "<BASEDIR>/.guimode"
+
+#define GUI_SLIDE_PX_PER_FRAME 20            // 320 / 20 = 16 frames ≈ 270 ms
+
+// Fallback label derived from filename when binary_info parsing fails:
+//   "picogenesisPlus_AdafruitFruitJam_arm_piousb.uf2" -> "picogenesisPlus"
+void makeLabelFromFilename(const char *fname, char *out, size_t n)
 {
     char tmp[ROMLISTER_MAXPATH];
     strncpy(tmp, fname, sizeof(tmp) - 1);
@@ -89,10 +178,7 @@ void makeLabel(const char *fname, char *out, size_t n)
     char *us = strchr(tmp, '_');
     if (us) *us = '\0';
 
-    char *s = tmp;
-    if (strncasecmp(s, "pico", 4) == 0 && s[4] != '\0') s += 4;
-
-    strncpy(out, s, n - 1);
+    strncpy(out, tmp, n - 1);
     out[n - 1] = '\0';
 }
 
@@ -104,11 +190,13 @@ void centerText(int row, const char *text, int fg, int bg)
     putText(x, row, text, fg, bg);
 }
 
-// Paint one menu frame into screenBuffer from the current selection state.
-void drawMenu(Frens::RomLister::RomEntry *entries, int count, int sel, int top, int visible)
+// Paint one menu frame. The flashed entry (g_flash_idx) gets a leading marker
+// to identify it as "the one currently in flash"; the selected row is shown
+// inverted. Both compose when the flashed row is also the selected row.
+void drawMenu(int sel, int top, int visible)
 {
     ClearScreen(COL_BG);
-    centerText(0, "P I C O   e m u L o a d e r", COL_FG, COL_BG);
+    centerText(0, "RP2350 bootloader " SWVERSION, COL_FG, COL_BG);
 
     char hdr[SCREEN_COLS + 1];
     snprintf(hdr, sizeof(hdr), "Config %d   %s", HW_CONFIG, g_emuDir);
@@ -118,20 +206,44 @@ void drawMenu(Frens::RomLister::RomEntry *entries, int count, int sel, int top, 
     memset(bar, ' ', SCREEN_COLS);
     bar[SCREEN_COLS] = '\0';
 
-    for (int i = 0; i < visible && (top + i) < count; i++) {
+    for (int i = 0; i < visible && (top + i) < g_emu_count; i++) {
         int idx = top + i;
-        bool seld = (idx == sel);
-        int fg = seld ? COL_BG : COL_FG;   // invert the highlighted row
+        bool seld    = (idx == sel);
+        bool flashed = (idx == g_flash_idx);
+        int fg = seld ? COL_BG : COL_FG;
         int bg = seld ? COL_FG : COL_BG;
         int row = STARTROW + i;
-        putText(0, row, bar, fg, bg);                 // paint the full-width bar
+        putText(0, row, bar, fg, bg);
+        // Prefer the friendly name from emulators.txt; fall back to the
+        // binary_info / filename-derived label when the txt has no row for
+        // this prog_name.
+        const char *name = g_emus[idx].display_name[0] ?
+                           g_emus[idx].display_name : g_emus[idx].label;
         char line[SCREEN_COLS + 1];
-        snprintf(line, sizeof(line), "%c %s", seld ? '>' : ' ', g_labels[idx]);
+        // Two prefix characters: selection marker, then flash-state marker.
+        // ">" = cursor; "*" = currently in flash and matches SD;
+        // "!" = currently in flash but SD copy differs (will reflash on launch).
+        char flashMark = ' ';
+        if (flashed) flashMark = g_flash_drift ? '!' : '*';
+        snprintf(line, sizeof(line), "%c %c %s",
+                 seld ? '>' : ' ',
+                 flashMark,
+                 name);
         putText(1, row, line, fg, bg);
     }
 
-    centerText(SCREEN_ROWS - 3, "UP / DOWN : choose", COL_FG, COL_BG);
-    centerText(SCREEN_ROWS - 2, "B : flash & launch", COL_FG, COL_BG);
+    // buttonLabel1 is the label of the button that triggers Btn::A on the
+    // attached pad (e.g. "A" on NES, "B" on XInput, "O" on PlayStation).
+    char buttonLabel1[2];
+    char buttonLabel2[2];
+    getButtonLabels(buttonLabel1, buttonLabel2);
+
+    char hint[SCREEN_COLS + 1];
+    centerText(SCREEN_ROWS - 4, "* in flash    ! SD differs (reflash)",
+               COL_FG, COL_BG);
+    centerText(SCREEN_ROWS - 3, "UP / DOWN : choose   SELECT : graphical", COL_FG, COL_BG);
+    snprintf(hint, sizeof(hint), "%s : start", buttonLabel1);
+    centerText(SCREEN_ROWS - 2, hint, COL_FG, COL_BG);
 }
 
 void showMessage(const char *l1, const char *l2, const char *l3)
@@ -140,6 +252,200 @@ void showMessage(const char *l1, const char *l2, const char *l3)
     if (l1) centerText(12, l1, COL_FG, COL_BG);
     if (l2) centerText(14, l2, COL_FG, COL_BG);
     if (l3) centerText(16, l3, COL_FG, COL_BG);
+}
+
+// --- Graphical error-screen rendering --------------------------------------
+//
+// The error screen is composed in two layers per frame:
+//   1. Charcell layer (via DrawScreen): title in a red bar, message body in an
+//      ASCII-bordered box, "Press RESET" line. Carries all the words.
+//   2. Direct-framebuffer overlay (overlayErrorDecor below): diagonal yellow/
+//      black caution-tape bands top + bottom, a big yellow disk with a red
+//      "!" punched through the top stripe band. Pure pixel writes -- nothing
+//      goes through the charcell pipeline. Drawn AFTER DrawScreen so it sits
+//      on top of (and overwrites) any charcell content in those bands.
+//
+// Both layers are repainted every frame in the fatalErrorScreen pump loop, so
+// nothing has to persist between frames.
+
+// NesMenuPalette indices used by the charcell layer. 0x16 / 0x06 are NES reds,
+// 0x30 is white. Picked to match the bright FB-direct red so the layers don't
+// clash visually.
+#define COL_ERR_BG  0x06
+#define COL_ERR_FG  0x30
+
+// 16-bit pixel colours for the FB-direct overlay. Two encodings depending on
+// the active backend -- the same split progress_bar.cpp uses.
+//   HSTX  : RGB555  (bit layout 0RRRRR GGGGG BBBBB)
+//   !HSTX : RGB444  packed as 0x0RGB (this codebase's PicoDVI encoding)
+#if HSTX
+#define ERRPX_YELLOW  0x7FE0u
+#define ERRPX_BLACK   0x0000u
+#define ERRPX_RED     0x7C00u
+#else
+#define ERRPX_YELLOW  0x0FF0u
+#define ERRPX_BLACK   0x0000u
+#define ERRPX_RED     0x0F00u
+#endif
+
+// Get the active backend's 320x240 framebuffer. Returns nullptr when there
+// isn't one (PicoDVI line-stream mode without a framebuffer) -- the caller
+// silently skips overlay in that case and the user still gets the charcell
+// layer alone.
+static uint16_t *getActiveFramebuffer()
+{
+#if HSTX
+    return (uint16_t *)hstx_getframebuffer();
+#else
+  #if FRAMEBUFFERISPOSSIBLE
+    if (!Frens::isFrameBufferUsed()) return nullptr;
+    return Frens::framebuffer;
+  #else
+    return nullptr;
+  #endif
+#endif
+}
+
+// Caution-tape stripe band: diagonal yellow/black stripes filling a horizontal
+// strip [y0, y0+h). Stripe width fixed at 12 px which gives a clear "caution"
+// look without going dizzy.
+static void drawStripeBand(uint16_t *fb, int y0, int h)
+{
+    const int W = 320;
+    for (int dy = 0; dy < h; dy++) {
+        int y = y0 + dy;
+        uint16_t *row = fb + y * W;
+        for (int x = 0; x < W; x++) {
+            row[x] = (((x + y) / 12) & 1) ? ERRPX_YELLOW : ERRPX_BLACK;
+        }
+    }
+}
+
+// Big yellow "!" disk centered horizontally at x=cx, vertically at y=cy.
+// Sits half-embedded in the top stripe band so the icon visually breaks
+// through it -- the whole point of having it there.
+static void drawWarningDisk(uint16_t *fb, int cx, int cy, int r)
+{
+    const int W = 320;
+    const int rSq        = r * r;
+    const int rSqInner   = (r - 3) * (r - 3);
+    // Yellow disk (with black outline ring carved out of the same loop).
+    for (int y = cy - r; y <= cy + r; y++) {
+        if (y < 0 || y >= 240) continue;
+        for (int x = cx - r; x <= cx + r; x++) {
+            int dx = x - cx, dy = y - cy;
+            int d  = dx * dx + dy * dy;
+            if (d > rSq) continue;
+            fb[y * W + x] = (d >= rSqInner) ? ERRPX_BLACK : ERRPX_YELLOW;
+        }
+    }
+    // Red "!" inside: a 5-px-wide bar above a 5x5 dot below.
+    auto fillRect = [&](int x0, int y0, int x1, int y1, uint16_t col) {
+        for (int y = y0; y <= y1; y++) {
+            if (y < 0 || y >= 240) continue;
+            for (int x = x0; x <= x1; x++) {
+                if (x < 0 || x >= W) continue;
+                fb[y * W + x] = col;
+            }
+        }
+    };
+    fillRect(cx - 2, cy - 14, cx + 2, cy + 4,  ERRPX_RED);  // tall bar
+    fillRect(cx - 2, cy + 8,  cx + 2, cy + 13, ERRPX_RED);  // dot
+}
+
+// Direct-framebuffer overlay. Called after DrawScreen() each frame so it
+// stays on top of the charcell pipeline.
+static void overlayErrorDecor()
+{
+    uint16_t *fb = getActiveFramebuffer();
+    if (!fb) return;
+
+    drawStripeBand(fb, 0,   16);     // top caution-tape band
+    drawStripeBand(fb, 224, 16);     // bottom caution-tape band
+    drawWarningDisk(fb, 160, 16, 22);  // breaks through the top band
+}
+
+// Charcell layout. Avoids rows 0..1 and 28..29 since those get overwritten
+// by the stripe overlay. Title and "Press RESET" use the same red bg as the
+// FB-direct red so the layers blend rather than clash.
+void drawErrorScreen(const char *title, const char *l1, const char *l2, const char *l3)
+{
+    ClearScreen(COL_BG);
+
+    // putText() collapses consecutive whitespace -- a 40-space string ends up
+    // writing only one cell, leaving the rest of the row untouched. Use '_'
+    // so each cell is treated as a non-space character; putText converts it
+    // back to a literal space at write time (menu.cpp:596), giving us a
+    // proper solid-bg row with no visible characters.
+    char bar[SCREEN_COLS + 1];
+    memset(bar, '_', SCREEN_COLS);
+    bar[SCREEN_COLS] = '\0';
+
+    // Title bar: solid red row with white centered title. Sits below the
+    // bottom edge of the warning disk (which lands around scanline 38 ~= row 4).
+    putText(0, 5, bar, COL_ERR_FG, COL_ERR_BG);
+    if (title) centerText(5, title, COL_ERR_FG, COL_ERR_BG);
+
+    // ASCII box around the three message lines (rows 10..14).
+    const int boxW = 36;
+    const int boxX = (SCREEN_COLS - boxW) / 2;
+    char border[SCREEN_COLS + 1];
+    border[0] = '+';
+    for (int i = 1; i < boxW - 1; i++) border[i] = '-';
+    border[boxW - 1] = '+';
+    border[boxW] = '\0';
+
+    putText(boxX, 10, border, COL_FG, COL_BG);
+    for (int r = 11; r <= 13; r++) {
+        putText(boxX,            r, "|", COL_FG, COL_BG);
+        putText(boxX + boxW - 1, r, "|", COL_FG, COL_BG);
+    }
+    putText(boxX, 14, border, COL_FG, COL_BG);
+
+    const char *lines[3] = { l1, l2, l3 };
+    for (int i = 0; i < 3; i++) {
+        if (lines[i]) centerText(11 + i, lines[i], COL_FG, COL_BG);
+    }
+
+    // "Press RESET" bar: another solid red row above the bottom stripe band.
+    putText(0, 21, bar, COL_ERR_FG, COL_ERR_BG);
+    centerText(21, "Press RESET to retry", COL_ERR_FG, COL_ERR_BG);
+}
+
+// Render the error screen and never return.
+//
+// The screen is entirely static (no animation, no input), so on backends with
+// a persistent framebuffer (HSTX, PicoDVI in framebuffer mode) we paint once
+// and then just pump USB. Redrawing every frame causes visible flicker: the
+// stripe rows go briefly blank between DrawScreen (which writes charcell bg
+// to those rows) and overlayErrorDecor (which paints stripes on top), and
+// the DMA scanout catches that gap.
+//
+// PicoDVI in line-stream mode has no framebuffer; every scanline is rebuilt
+// from screenBuffer on the fly, so DrawScreen must run every frame. The
+// overlay does nothing there (no framebuffer to write to) -- but DrawScreen
+// alone never tears because the line pipeline is single-pass.
+[[noreturn]] void fatalErrorScreen(const char *title,
+                                   const char *l1, const char *l2, const char *l3)
+{
+    LOG("FATAL: %s", title ? title : "(no title)");
+    if (l1) LOG("       %s", l1);
+    if (l2) LOG("       %s", l2);
+    if (l3) LOG("       %s", l3);
+    drawErrorScreen(title, l1, l2, l3);
+
+    bool persistentFB = (getActiveFramebuffer() != nullptr);
+
+    // One-shot paint. DrawScreen pushes the charcell layer into the FB (or
+    // the line pipeline on line-stream); overlay then sits on top on FB-mode.
+    DrawScreen(-1);
+    if (persistentFB) overlayErrorDecor();
+
+    for (;;) {
+        tuh_task();
+        if (!persistentFB) DrawScreen(-1);  // line-stream needs every frame
+        sleep_ms(16);
+    }
 }
 
 // Pump USB + render for a fixed time (display stays live).
@@ -162,7 +468,7 @@ void logBootCause()
 }
 
 // Inspect the application partition's vector table and report whether it looks
-// like a runnable image. Useful for diagnosing "why didn't it resume?" cases.
+// like a runnable image.
 void logAppPartitionState(const char *when)
 {
     const uint32_t *vt = (const uint32_t *)APP_BASE_ADDR;
@@ -173,20 +479,435 @@ void logAppPartitionState(const char *when)
         when, (unsigned)sp, (unsigned)reset, (int)present);
 }
 
-// uf2_loader progress callback: UART-only. The HSTX display is driven by
-// core1 in this framework, and we reset core1 just before flashing -- so the
-// on-screen picture goes blank for the duration of the flash regardless of
-// what we paint into the framebuffer. UART output is throttled to once per
-// 64 blocks plus the boundary events (start/end), so it does not bottleneck
-// the flash loop.
-void flashProgress(const char *phase, uint32_t done, uint32_t total)
+// __not_in_flash_func: the whole callback path is SRAM-resident so we never
+// have to worry about XIP state. No printf/LOG inside -- bookend logging
+// happens in flashAndLaunch around uf2_load_file. The throttle (done & 0x3F)
+// keeps redraw cost down for large images (otherwise ~16 K calls).
+//
+// LED heartbeat: on picoDVI HW configs the DVI receiver loses sync during the
+// ~50 ms-per-sector erase windows even with the full SRAM audit -- HSTX's
+// HW-accelerated IRQ is microseconds, picoDVI's PIO encoder isn't. The
+// progress bar is invisible while the screen is dark, so toggle the onboard
+// LED here too: it's a direct gpio_put on core0 between flash calls (XIP is
+// restored at each callback boundary), and gives the user some "still alive"
+// feedback during the dark stretch. On HSTX configs the screen also stays up
+// so the LED is just bonus.
+extern "C" void __not_in_flash_func(flashProgress)(int phase, uint32_t done, uint32_t total)
 {
-    bool isWriting = (strcmp(phase, "Writing") == 0);
-    bool boundary  = (done == 0 || done == total);
-    if (boundary || !isWriting || (done & 0x3F) == 0) {
-        unsigned pct = (total > 0) ? (unsigned)(((uint64_t)done * 100) / total) : 0;
-        LOG("  %s %u / %u  (%u%%)", phase, (unsigned)done, (unsigned)total, pct);
+    // Combined percentage: erase contributes 0..10, write contributes 10..100.
+    uint32_t pct;
+    if (phase == UF2_PROGRESS_ERASE) {
+        pct = (total > 0) ? (done * 10u / total) : 0;
+    } else {
+        uint32_t w = (total > 0) ? (done * 90u / total) : 0;
+        pct = 10u + w;
+        // Throttle write-phase redraws: a 2 MB image is ~8192 pages, plenty
+        // of opportunity to skip frames where pct didn't move visibly.
+        bool boundary = (done == 0 || done == total);
+        if (!boundary && (done & 0x3F) != 0) return;
     }
+    progress_bar_draw(pct, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
+
+    // LED heartbeat -- toggle on every accepted callback so the user sees
+    // activity even while the picoDVI signal is gone.
+    static bool led_on = false;
+    led_on = !led_on;
+    Frens::blinkLed(led_on);
+}
+
+// Read the SD directory, parse each emulator's program_name from its binary_info,
+// build g_emus[], and locate the in-flash entry (g_flash_idx).
+//
+// Filtering: an .uf2 file is added to g_emus[] only if its program_name has a
+// matching row in /emu/emulators.txt. Files that aren't listed (third-party
+// builds, test images, .uf2 files for unrelated tools) are silently skipped --
+// the picker should show only emulators that the maintainer of this card has
+// curated as launchable.
+void scanEmulators()
+{
+    g_emu_count = 0;
+    g_emu_seen  = 0;
+
+    // f_stat first: RomLister::list() silently falls back to chdir("/") when
+    // its target directory doesn't exist (RomLister.cpp:118) and then lists
+    // the root, which would show whatever the user has at the top of the SD
+    // (e.g. 10 unrelated .uf2 files) as if they were emulators for this
+    // config. Skip the lister entirely when the config dir is missing so
+    // the post-scan path lands on the right "nothing here" error.
+    FILINFO fi;
+    FRESULT fr = f_stat(g_emuDir, &fi);
+    bool dir_ok = (fr == FR_OK) && (fi.fattrib & AM_DIR);
+    if (!dir_ok) {
+        LOG("Config dir %s not present (f_stat=%d, attr=0x%02x); leaving emu list empty.",
+            g_emuDir, (int)fr, (unsigned)fi.fattrib);
+    } else {
+        Frens::RomLister lister(32 * 1024, ".uf2");
+        lister.list(g_emuDir);
+        int count = (int)lister.Count();
+        auto *entries = lister.GetEntries();
+
+        int cap = (int)(sizeof(g_emus) / sizeof(g_emus[0]));
+        if (count > cap) {
+            LOG("WARNING: %d entries found, capping list at %d", count, cap);
+            count = cap;
+        }
+
+        g_emu_seen  = count;
+        int skipped = 0;
+        uint32_t flash_end = appFlashEnd();
+        for (int i = 0; i < count; i++) {
+            SdEmu &e = g_emus[g_emu_count];
+            strncpy(e.filename, entries[i].Path, sizeof(e.filename) - 1);
+            e.filename[sizeof(e.filename) - 1] = '\0';
+
+            char full[FF_MAX_LFN];
+            snprintf(full, sizeof(full), "%s/%s", g_emuDir, e.filename);
+
+            e.prog_name[0]    = '\0';
+            e.image_key[0]    = '\0';
+            e.display_name[0] = '\0';
+            e.aux_uf2[0]      = '\0';
+            bool ok = program_name_from_uf2_file(full, e.prog_name, sizeof(e.prog_name));
+            if (!ok || !e.prog_name[0]) {
+                LOG("  SKIP %s (binary_info parse failed; no program_name)", e.filename);
+                skipped++;
+                continue;
+            }
+            strncpy(e.label, e.prog_name, sizeof(e.label) - 1);
+            e.label[sizeof(e.label) - 1] = '\0';
+
+            // The emulators.txt match is mandatory: an unlisted .uf2 is not
+            // shown. This is how Frank curates which emulators are "supported"
+            // on this card -- the bootloader trusts the txt as the allow-list.
+            bool matched = emulators_txt_lookup(e.prog_name,
+                                                e.image_key,    sizeof(e.image_key),
+                                                e.display_name, sizeof(e.display_name),
+                                                e.aux_uf2,      sizeof(e.aux_uf2));
+            if (!matched) {
+                LOG("  SKIP %s (prog_name=\"%s\" not in emulators.txt)",
+                    e.filename, e.prog_name);
+                skipped++;
+                continue;
+            }
+
+            // Size gate: hide entries whose image (or companion data image)
+            // extends past the end of the actual flash chip. An extent probe
+            // failure is NOT a skip -- the flash-time validate in
+            // flashAndLaunch() remains the backstop for odd files.
+            uint32_t lo, hi;
+            if (uf2_extent_from_file_family(full, UF2_FAMILY_RP2350_ARM_S,
+                                            &lo, &hi) && hi > flash_end) {
+                LOG("  SKIP %s (image 0x%08X-0x%08X exceeds flash end 0x%08X, %u KB over)",
+                    e.filename, (unsigned)lo, (unsigned)hi, (unsigned)flash_end,
+                    (unsigned)((hi - flash_end + 1023) / 1024));
+                skipped++;
+                continue;
+            }
+            if (e.aux_uf2[0]) {
+                char auxFull[FF_MAX_LFN];
+                snprintf(auxFull, sizeof(auxFull), "%s/%s", g_emuDir, e.aux_uf2);
+                if (uf2_extent_from_file_family(auxFull, UF2_FAMILY_RP2350_DATA,
+                                                &lo, &hi) && hi > flash_end) {
+                    LOG("  SKIP %s (aux %s at 0x%08X-0x%08X exceeds flash end 0x%08X)",
+                        e.filename, e.aux_uf2, (unsigned)lo, (unsigned)hi,
+                        (unsigned)flash_end);
+                    skipped++;
+                    continue;
+                }
+            }
+            LOG("  [%2d] %-40s  prog_name=\"%s\"  img_key=\"%s\"  display=\"%s\"%s%s",
+                g_emu_count, e.filename, e.prog_name, e.image_key, e.display_name,
+                e.aux_uf2[0] ? "  aux=" : "", e.aux_uf2[0] ? e.aux_uf2 : "");
+            g_emu_count++;
+        }
+        LOG("Listed %d of %d .uf2 file(s) in %s (%d skipped).",
+            g_emu_count, g_emu_seen, g_emuDir, skipped);
+    }
+
+    g_flash_prog_name[0] = '\0';
+    g_flash_idx = -1;
+    g_flash_drift = false;
+    if (app_launch_present()) {
+        if (program_name_from_xip(APP_BASE_ADDR, APP_PARTITION_SIZE,
+                                  g_flash_prog_name, sizeof(g_flash_prog_name))) {
+            LOG("In-flash program_name: \"%s\"", g_flash_prog_name);
+            for (int i = 0; i < g_emu_count; i++) {
+                if (g_emus[i].prog_name[0] &&
+                    strcmp(g_emus[i].prog_name, g_flash_prog_name) == 0) {
+                    g_flash_idx = i;
+                    break;
+                }
+            }
+            LOG("In-flash match: %s (idx=%d)",
+                g_flash_idx >= 0 ? g_emus[g_flash_idx].filename : "(no match)",
+                g_flash_idx);
+        } else {
+            LOG("In-flash image present but binary_info parse failed.");
+        }
+    } else {
+        LOG("No valid image currently in flash.");
+    }
+
+    // If we matched the in-flash image to an SD entry by program_name,
+    // CRC32-compare the two to detect "user dropped a new build on the card".
+    // If the bytes differ, set g_flash_drift so the picker reflashes on launch.
+    if (g_flash_idx >= 0) {
+        char full[FF_MAX_LFN];
+        snprintf(full, sizeof(full), "%s/%s", g_emuDir, g_emus[g_flash_idx].filename);
+
+        uf2_fingerprint_t fp = {0};
+        if (uf2_fingerprint_from_file(full, &fp)) {
+            uint32_t flash_crc = 0;
+            if (uf2_fingerprint_from_xip(fp.image_base, fp.image_size, &flash_crc)) {
+                if (flash_crc != fp.crc) {
+                    g_flash_drift = true;
+                    LOG("DRIFT: SD CRC=0x%08X  flash CRC=0x%08X  -> reflash on launch",
+                        (unsigned)fp.crc, (unsigned)flash_crc);
+                } else {
+                    LOG("In-flash image matches SD copy (CRC 0x%08X, %u bytes).",
+                        (unsigned)fp.crc, (unsigned)fp.image_size);
+                }
+            } else {
+                LOG("WARN: XIP fingerprint failed (base=0x%08X size=%u)",
+                    (unsigned)fp.image_base, (unsigned)fp.image_size);
+            }
+        } else {
+            LOG("WARN: SD fingerprint failed for %s", full);
+        }
+    }
+}
+
+// AuxState tells the launch dispatcher how to handle a row's aux blob.
+//   NO_AUX  : emulators.txt has no 4th column for this row -- ignore aux entirely.
+//   MATCH   : SD file's CRC matches the bytes already at its target XIP address.
+//   DRIFT   : SD and flash differ (or the flash region is blank) -- reflash needed.
+//   ERROR   : couldn't fingerprint the SD file -- log and proceed without flashing.
+enum AuxState { AUX_NO_AUX, AUX_MATCH, AUX_DRIFT, AUX_ERROR };
+
+static AuxState computeAuxDrift(int idx, uf2_fingerprint_t *out_fp)
+{
+    if (out_fp) *out_fp = {};
+    if (idx < 0 || idx >= g_emu_count) return AUX_NO_AUX;
+    const char *aux = g_emus[idx].aux_uf2;
+    if (!aux[0]) return AUX_NO_AUX;
+
+    char full[FF_MAX_LFN];
+    snprintf(full, sizeof(full), "%s/%s", g_emuDir, aux);
+
+    uf2_fingerprint_t fp = {0};
+    if (!uf2_fingerprint_from_file_family(full, UF2_FAMILY_RP2350_DATA, &fp)) {
+        LOG("WARN: aux fingerprint failed for %s -- launching without flashing it", full);
+        return AUX_ERROR;
+    }
+    if (out_fp) *out_fp = fp;
+
+    uint32_t flash_crc = 0;
+    if (!uf2_fingerprint_from_xip(fp.image_base, fp.image_size, &flash_crc)) {
+        LOG("WARN: aux XIP fingerprint failed (base=0x%08X size=%u)",
+            (unsigned)fp.image_base, (unsigned)fp.image_size);
+        return AUX_DRIFT;   // safest: reflash
+    }
+    if (flash_crc == fp.crc) {
+        LOG("Aux blob already in flash (CRC 0x%08X, %u bytes at 0x%08X); skipping.",
+            (unsigned)fp.crc, (unsigned)fp.image_size, (unsigned)fp.image_base);
+        return AUX_MATCH;
+    }
+    LOG("Aux drift: SD CRC=0x%08X  flash CRC=0x%08X  -> reflash on launch",
+        (unsigned)fp.crc, (unsigned)flash_crc);
+    return AUX_DRIFT;
+}
+
+// Do the final "hand off to the emulator" sequence: quiesce I2C/core1, mark
+// the handshake register, and VTOR-jump. Never returns on success.
+[[noreturn]] void handoffToApp(const char *label)
+{
+    LOG("Launching %s; bye!", label ? label : "(unknown)");
+    stdio_flush();
+#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+    wiipad_end();
+#endif
+    multicore_reset_core1();   // hand HSTX over; emulator brings its own driver up
+    Frens::markLaunchedFromBootloader();
+    app_launch_run();          // VTOR jump; no return on success
+    LOG("app_launch_run() returned unexpectedly.");
+    watchdog_reboot(0, 0, 0);
+    for (;;) tight_loop_contents();
+}
+
+// Launch the already-flashed emulator. No flash op; just quiesce and jump.
+void launchInFlash()
+{
+    LOG("Launching in-flash emulator: %s", g_flash_prog_name);
+    if (!app_launch_present()) {
+        LOG("ERROR: app_launch_present()=false at launch time; refusing.");
+        showMessage("App partition is empty.", "Pick an emulator to flash.", nullptr);
+        idleFor(2500);
+        return;
+    }
+    handoffToApp(g_flash_prog_name);
+}
+
+// Flash paths (emulator .uf2 and optional aux .uf2) into flash and launch the
+// emulator. Either or both flashes can be requested:
+//   flashEmu=true  : write g_emus[idx].filename to the app partition.
+//   flashAux=true  : write g_emus[idx].aux_uf2 at *auxFp's target address.
+// If both are false, callers should use launchInFlash() instead -- but this
+// function still handles that case gracefully by just jumping.
+void flashAndLaunch(int idx, bool flashEmu, bool flashAux, const uf2_fingerprint_t *auxFp)
+{
+    char full[FF_MAX_LFN];
+    snprintf(full, sizeof(full), "%s/%s", g_emuDir, g_emus[idx].filename);
+    LOG("Flash & launch: [%d] %s  flashEmu=%d flashAux=%d",
+        idx, full, (int)flashEmu, (int)flashAux);
+
+    uf2_load_stats_t st;
+
+    // Pre-flight the emulator UF2 first (display still alive). Skip if the
+    // caller just wants the aux flashed.
+    if (flashEmu) {
+        LOG("Pre-flight validating emulator UF2 (pass 1, no flash writes)...");
+        uf2_load_result_t vr = uf2_validate_file(full, &st);
+        LOG("  result: %s", uf2_load_result_str(vr));
+        if (vr != UF2_LOAD_OK) {
+            LOG("REJECTED: %s", uf2_load_result_str(vr));
+            showMessage("Cannot flash this file:", g_emus[idx].filename, uf2_load_result_str(vr));
+            idleFor(3000);
+            return;
+        }
+    }
+
+    // Pre-flight the aux UF2 too, using its own target range (derived from
+    // the fingerprint pass, so we don't re-scan the file).
+    char auxFull[FF_MAX_LFN] = {0};
+    if (flashAux) {
+        if (!auxFp || !g_emus[idx].aux_uf2[0]) {
+            LOG("BUG: flashAux=true but no aux fingerprint / column");
+            return;
+        }
+        snprintf(auxFull, sizeof(auxFull), "%s/%s", g_emuDir, g_emus[idx].aux_uf2);
+        LOG("Pre-flight validating aux UF2 %s at [0x%08X..0x%08X)...",
+            auxFull, (unsigned)auxFp->image_base,
+            (unsigned)(auxFp->image_base + auxFp->image_size));
+        uf2_load_stats_t astp;
+        uf2_load_result_t vr = uf2_validate_file_ex(auxFull,
+            auxFp->image_base, auxFp->image_base + auxFp->image_size,
+            UF2_FAMILY_RP2350_DATA, &astp);
+        LOG("  result: %s", uf2_load_result_str(vr));
+        if (vr != UF2_LOAD_OK) {
+            LOG("REJECTED aux: %s", uf2_load_result_str(vr));
+            showMessage("Cannot flash aux blob:", g_emus[idx].aux_uf2, uf2_load_result_str(vr));
+            idleFor(3000);
+            return;
+        }
+    }
+
+    // Build a short header line naming what's being flashed. The user cares
+    // about "Flashing" more than which one; keep the extra line short.
+    // Prefer display_name so this repaint matches the instant acknowledgment
+    // the picker loop already put up at A-press time (no visible text swap).
+    const char *line1 = "Flashing";
+    const char *line2 = g_emus[idx].display_name[0] ?
+                        g_emus[idx].display_name : g_emus[idx].label;
+    const char *line3 = "Do not power off.";
+    if (flashAux && !flashEmu) {
+        line1 = "Flashing WAD";
+    } else if (flashAux && flashEmu) {
+        line3 = "WAD + emulator...";
+    }
+
+#if HSTX
+    // HSTX path: hardware-accelerated TMDS encoding gives microsecond IRQs
+    // on core1, so it keeps running cleanly through every flash erase/write
+    // window. The live progress bar updates in real time and the audit in
+    // framework-flash-while-running.md keeps core1 SRAM-only throughout.
+    showMessage(line1, line2, line3);
+    DrawScreen(-1);
+    idleFor(FLASH_NOTICE_MS);
+
+    // Paint an empty 0% bar so the user sees the bar's box appear before any
+    // flash writes start. Colours are compile-time literals (see PB_COL_*),
+    // so the flash callback never has to dereference flash for them.
+    progress_bar_draw(0, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
+
+    LOG("Pre-flight OK. core1 left running; beginning flash sequence.");
+#else
+    // picoDVI path: software TMDS encoding on core1 (PIO encoder) is too
+    // timing-sensitive to survive multi-second flash ops -- the DVI
+    // receiver drops sync inside the first sector erase even with a full
+    // SRAM audit of core1. Stop core1 entirely before flashing so it can't
+    // hardfault on anything; the screen goes intentionally dark and the
+    // LED heartbeat in flashProgress() carries progress for the user.
+    showMessage("Screen will go blank.",
+                LED_GPIO_PIN == -1 ? "" :"Watch LED for progress.",
+                "Be patient...");
+    DrawScreen(-1);
+    idleFor(PICO_DVI_FLASH_NOTICE_MS);
+
+    LOG("Pre-flight OK. picoDVI: stopping core1 before flash sequence.");
+    multicore_reset_core1();
+#endif
+
+    // Aux blob first (small, and we want it in place before the emulator
+    // boots and reads from it). See plan for the ordering rationale.
+    if (flashAux) {
+        LOG("Flashing aux blob %s ...", auxFull);
+        uf2_load_stats_t ast;
+        uf2_load_result_t r = uf2_load_file_ex(auxFull,
+            auxFp->image_base, auxFp->image_base + auxFp->image_size,
+            UF2_FAMILY_RP2350_DATA, &ast, flashProgress);
+        if (r != UF2_LOAD_OK) {
+            LOG("Aux flash FAILED: %s (after %u programmed, %u skipped)",
+                uf2_load_result_str(r),
+                (unsigned)ast.programmed_blocks, (unsigned)ast.skipped_blocks);
+            stdio_flush();
+            watchdog_reboot(0, 0, 0);
+            for (;;) tight_loop_contents();
+        }
+        LOG("Aux flash OK: %u blocks written to 0x%08X..0x%08X",
+            (unsigned)ast.programmed_blocks,
+            (unsigned)ast.lowest_addr, (unsigned)ast.highest_addr);
+#if HSTX
+        // Reset the bar to 0% for the next phase so the second flash starts
+        // fresh instead of finishing full-on-full.
+        if (flashEmu) progress_bar_draw(0, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
+#endif
+    }
+
+    if (flashEmu) {
+        LOG("Flashing emulator %s ...", full);
+        uf2_load_result_t r = uf2_load_file(full, &st, flashProgress);
+        if (r != UF2_LOAD_OK) {
+            LOG("Flash FAILED: %s (after %u programmed, %u skipped)",
+                uf2_load_result_str(r),
+                (unsigned)st.programmed_blocks, (unsigned)st.skipped_blocks);
+            stdio_flush();
+            watchdog_reboot(0, 0, 0);
+            for (;;) tight_loop_contents();
+        }
+        LOG("Flash OK: %u blocks written to 0x%08X..0x%08X",
+            (unsigned)st.programmed_blocks,
+            (unsigned)st.lowest_addr, (unsigned)st.highest_addr);
+    }
+
+#if HSTX
+    // Force a final 100% paint before we tear down core1.
+    progress_bar_draw(100, 100, PB_COL_FILL, PB_COL_EMPTY, PB_COL_BORDER);
+#endif
+    logAppPartitionState("after flash");
+    if (app_launch_present()) {
+        handoffToApp(g_emus[idx].label);
+    }
+    LOG("ERROR: app_launch_present()=false after flash; rebooting.");
+
+    // Reboot to recover a clean state; the resume check's app_launch_present()
+    // guard prevents jumping into a half-written partition.
+    LOG("Rebooting bootloader to recover a clean state.");
+    stdio_flush();
+#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+    wiipad_end();
+#endif
+    watchdog_reboot(0, 0, 0);
+    for (;;) tight_loop_contents();
 }
 
 } // namespace
@@ -196,7 +917,7 @@ int main()
     Frens::setClocksAndStartStdio(CPUFREQ_KHZ, VREG_VOLTAGE_1_30);
 
     // --- BANNER -------------------------------------------------------------
-    LOG("---- Pico emuLoader booting ----");
+    LOG("---- Pico bootLoader booting ----");
     LOG("Build: %s %s   SDK: " PICO_SDK_VERSION_STRING, __DATE__, __TIME__);
     LOG("HW_CONFIG=%d  sys_clk=%lu Hz  vreg=1.30V",
         HW_CONFIG, (unsigned long)clock_get_hz(clk_sys));
@@ -209,17 +930,21 @@ int main()
     logAppPartitionState("at boot");
 
     // --- RESUME CHECK -------------------------------------------------------
-    // A menu-triggered reboot inside an emulator (no-PSRAM ROM load) sets the
-    // SDK watchdog-enable flag; a physical reset does not. If an emulator asked
-    // to be resumed and a valid image is present, jump straight back to it so
-    // the emulator can finish flashing/starting its ROM. Leaves the watchdog
-    // scratch untouched so the emulator still sees watchdog_enable_caused_reboot.
-    if (watchdog_enable_caused_reboot() && app_launch_present()) {
+    // If the previously-running emulator asked to return to the picker
+    // (Frens::rebootToBootloader() before its watchdog_reboot), honour that
+    // request and fall through to the menu even though watchdog_enable
+    // would otherwise trigger the resume jump.
+    bool returnRequested = Frens::consumeReturnToBootloaderRequest();
+    if (returnRequested) {
+        LOG("Return-to-loader requested by app; skipping resume jump.");
+    }
+    if (!returnRequested && watchdog_enable_caused_reboot() && app_launch_present()) {
         LOG("Resume path: watchdog_enable=true and app image valid");
         LOG("Jumping to app reset vector at 0x%08X (no return on success)",
             (unsigned)((const uint32_t *)APP_BASE_ADDR)[1]);
         stdio_flush();
-        app_launch_run();   // no return on success
+        Frens::markLaunchedFromBootloader();
+        app_launch_run();
         LOG("Resume refused (no valid image); falling through to menu.");
     } else {
         LOG("No resume: showing emulator picker.");
@@ -230,152 +955,418 @@ int main()
     FrensSettings::initSettings(FrensSettings::emulators::MULTI);
     char dummyRom[FF_MAX_LFN];
     dummyRom[0] = '\0';
-    bool sdOk = Frens::initAll(dummyRom, CPUFREQ_KHZ, 0, 0, 256, false, false);
+    // useFrameBuffer=true: HSTX always has its own FB; on RP2350 PicoDVI
+    // (FRAMEBUFFERISPOSSIBLE) this picks the framebuffer path instead of
+    // line-streaming, which is what the FB-direct overlays (progress bar,
+    // error screen decor) need to have something to write to. RP2040 is
+    // out of scope -- FRAMEBUFFERISPOSSIBLE is false there and the flag
+    // is ignored at the !HSTX && FRAMEBUFFERISPOSSIBLE gate in
+    // FrensHelpers.cpp:1639.
+    //
+    // audiobufferSize=1024 (not 256): in PicoDVI framebuffer mode the
+    // emulators all use 1024; pico-infonesPlus main.cpp explicitly notes
+    // "When using framebuffer, AUDIOBUFFERSIZE must be increased to 1024".
+    // (256 was once blamed for an intermittent startup deadlock here --
+    // core1 wedged in the DVI DMA IRQ, core0 in PaceFrames60fps waiting
+    // for vsync. Real cause found 2026-07: our global -Os left
+    // std::lock_guard & friends out of line in flash, so the DMA IRQ
+    // fetched flash code every scanline and, under core0 XIP/SD traffic,
+    // could miss its control-block reload deadline, silently killing the
+    // DMA chain. Fixed in pico_lib (SpinLockGuard etc.); the buffer size
+    // only shifted the timing.)
+    bool sdOk = Frens::initAll(dummyRom, CPUFREQ_KHZ, 0, 0, 1024, false, true);
     LOG("initAll done. SD mounted=%d  PSRAM=%d  framebufferUsed=%d",
         (int)sdOk, (int)Frens::isPsramEnabled(), (int)Frens::isFrameBufferUsed());
+
+    // Force 1:1 scaling so the full 320x240 framebuffer is shown. The global
+    // scaleMode8_7_ defaults to true and is read by the DVI core1 render loop
+    // to pick convertScanBuffer12bppScaled16_7 (clips 34 src px off the left)
+    // vs convertScanBuffer12bpp (1:1). applyScreenMode returns the new value
+    // -- we must assign it to the extern, like pico-infonesPlus does.
+    scaleMode8_7_ = Frens::applyScreenMode(ScreenMode::NOSCANLINE_1_1);
     if (sdOk) {
         char fstype[16] = {0};
         Frens::getFsInfo(fstype, sizeof(fstype));
         LOG("Filesystem: %s", fstype);
     }
 
+    // Clamp the loader's app-partition end to the real chip capacity. The
+    // build-time APP_END_ADDR assumes a 16 MB chip (Fruit Jam); on a smaller
+    // chip we'd otherwise let an over-large image march past real flash.
+    {
+        uint32_t end = appFlashEnd();
+        uf2_loader_set_app_end_addr(end);
+        LOG("Flash capacity (JEDEC): %u bytes  app-end clamp: 0x%08X",
+            (unsigned)Frens::storage_get_flash_capacity(), (unsigned)end);
+    }
     screenBuffer = (charCell *)Frens::f_malloc(screenbufferSize);
     LOG("Allocated %u-byte screenBuffer at %p", (unsigned)screenbufferSize, screenBuffer);
 
-    snprintf(g_emuDir, sizeof(g_emuDir), "/emu/%d", HW_CONFIG);
-    LOG("Scanning %s for *.uf2...", g_emuDir);
-
-    // List the emulators for this board config.
-    Frens::RomLister lister(32 * 1024, ".uf2");
-    int count = 0;
-    Frens::RomLister::RomEntry *entries = nullptr;
-    if (sdOk) {
-        lister.list(g_emuDir);
-        count = (int)lister.Count();
-        entries = lister.GetEntries();
-        if (count > (int)(sizeof(g_labels) / sizeof(g_labels[0]))) {
-            LOG("WARNING: %d entries found, capping list at %u (recompile to raise)",
-                count, (unsigned)(sizeof(g_labels) / sizeof(g_labels[0])));
-            count = (int)(sizeof(g_labels) / sizeof(g_labels[0]));
-        }
-        for (int i = 0; i < count; i++) {
-            makeLabel(entries[i].Path, g_labels[i], ROMLISTER_MAXPATH);
-            LOG("  [%2d] %-40s  label=\"%s\"", i, entries[i].Path, g_labels[i]);
-        }
-        LOG("Found %d emulator UF2(s) in %s.", count, g_emuDir);
-    }
-
     if (!sdOk) {
-        LOG("FATAL: SD card mount failed; cannot list emulators.");
-        showMessage("SD card not found.", "Insert a card and reset.", nullptr);
-        for (;;) { tuh_task(); DrawScreen(-1); sleep_ms(16); }
+        fatalErrorScreen("SD CARD NOT FOUND",
+                         "Insert a FAT-formatted card",
+                         "and reset.",
+                         nullptr);
     }
-    if (count == 0) {
-        LOG("FATAL: no .uf2 files in %s. Copy emulator UF2s there.", g_emuDir);
+
+    // Load /boot.txt. Missing file -> defaults ("/emu", "emulators.txt",
+    // STARFIELD). Present but malformed -> fatal, so the user knows the
+    // config didn't take effect instead of silently reverting to defaults.
+    sd_boot_ini_t ini;
+    char ini_err[64] = {0};
+    LOG("Loading /boot.txt (optional)...");
+    if (sd_boot_ini_load("/boot.txt", &ini, ini_err, sizeof(ini_err)) != SD_BOOT_INI_OK) {
+        fatalErrorScreen("BOOT.TXT INVALID",
+                         ini_err,
+                         "Fix /boot.txt and reset.",
+                         nullptr);
+    }
+    LOG("boot_ini: BASEDIR=%s INDEX=%s SCREENSAVER=%s",
+        ini.base_dir, ini.index_file,
+        ini.screensaver == SS_MODE_STARFIELD ? "STARFIELD" : "BLOCKS");
+
+    snprintf(g_emuDir,       sizeof(g_emuDir),       "%s/%d",      ini.base_dir, HW_CONFIG);
+    snprintf(g_index_path,   sizeof(g_index_path),   "%s/%s",      ini.base_dir, ini.index_file);
+    snprintf(g_guimode_path, sizeof(g_guimode_path), "%s/.guimode", ini.base_dir);
+    gui_set_asset_dir(ini.base_dir);
+    screensaver_set_asset_dir(ini.base_dir);
+    screensaver_set_mode(ini.screensaver);
+
+    // Pre-load the emulators.txt (or user-renamed) index. It's the allow-list
+    // that scanEmulators() filters SD .uf2 files against, so a missing or
+    // empty file means we'd hide every emulator and confuse the user with a
+    // "no matching emulators" screen. Name the real cause directly instead.
+    LOG("Loading %s...", g_index_path);
+    if (!emulators_txt_load(g_index_path)) {
+        fatalErrorScreen("INDEX FILE MISSING",
+                         "Place the index file at",
+                         g_index_path,
+                         "and reset.");
+    }
+
+    // Parse program_name from every .uf2 on SD and from the in-flash image.
+    // Briefly tell the user what's happening (this can take a second or two
+    // while we seek through 5+ files on slow SD cards).
+    showMessage("Scanning emulators...", g_emuDir, nullptr);
+    DrawScreen(-1);
+    LOG("Scanning %s for *.uf2 and parsing binary_info...", g_emuDir);
+    scanEmulators();
+
+    if (g_emu_count == 0) {
         char m[48];
-        snprintf(m, sizeof(m), "No emulators in %s", g_emuDir);
-        showMessage(m, "Copy emulator .uf2 files there", "and reset.");
-        for (;;) { tuh_task(); DrawScreen(-1); sleep_ms(16); }
+        if (g_emu_seen == 0) {
+            // No .uf2 files at all in the config dir.
+            snprintf(m, sizeof(m), "Nothing in %s", g_emuDir);
+            fatalErrorScreen("NO EMULATORS FOUND",
+                             m,
+                             "Copy emulator .uf2 files there",
+                             "and reset.");
+        } else {
+            // .uf2 files exist but none are listed in the index -- either
+            // the file is missing, or its entries don't match any prog_name.
+            snprintf(m, sizeof(m), "%d UF2 file(s) found in %s",
+                     g_emu_seen, g_emuDir);
+            fatalErrorScreen("NO MATCHING EMULATORS",
+                             m,
+                             "but none listed in",
+                             g_index_path);
+        }
+    }
+
+    // Materialise .444/.555 caches for any PNG/JPG images on the card. On
+    // boards without PSRAM this must happen NOW: the converter needs ~60 KB
+    // of contiguous SRAM heap (dominated by the PNG decoder state) and that
+    // stops being available once the GUI slide buffers (~190 KB) are
+    // allocated below. PSRAM boards keep the existing behaviour -- picker
+    // tiles convert lazily on first view and the screensaver batches at
+    // first activation -- since their scratch lives in lwmem, not here.
+    if (!Frens::isPsramEnabled()) {
+        char asset_sub[96];
+        snprintf(asset_sub, sizeof(asset_sub), "%s/assets", ini.base_dir);
+        image_convert_batch_dir(asset_sub, SCREENWIDTH, SCREENHEIGHT,
+                                /*letterbox=*/true, "Converting menu images");
+        screensaver_convert_batch();
     }
 
     // --- PICKER LOOP --------------------------------------------------------
-    LOG("Entering picker loop. D-pad: navigate, B: flash & launch.");
+    LOG("Entering picker loop. D-pad: navigate, A: start, SELECT: toggle graphical.");
     const int visible = ENDROW - STARTROW + 1;
-    int sel = 0, top = 0;
+    int sel = (g_flash_idx >= 0) ? g_flash_idx : 0;
+    int top = 0;
+    if (sel >= visible) top = sel - visible + 1;
     uint32_t prevButtons = 0;
     using Btn = io::GamePadState::Button;
 
-    for (;;) {
-        tuh_task();
+    // Graphical-mode state. Buffers are allocated lazily on first entry so
+    // text-only sessions don't pay the ~300 KB cost.
+    bool graphical_mode = false;
+    bool buffers_ready  = false;
+    int  slide_p        = 0;        // 0..SCREENWIDTH, pixels of the new image visible
+    int  slide_dir      = 0;        // +1 = new enters from right, -1 = from left, 0 = idle
 
+    // Screensaver state. Activates after 30 s of no input; loads up to 5
+    // small bouncing images from /emu/assets/screensaver/ and exits on any
+    // button press. `ss_unavailable` latches when the first init attempt
+    // finds nothing usable so we don't keep retrying every frame.
+    constexpr uint32_t SS_IDLE_THRESHOLD = 30 * 60;   // 30 s @ 60 fps
+    uint32_t idle_frames    = 0;
+    bool     ss_active      = false;
+    bool     ss_unavailable = false;
+
+    // Single loader that picks the full-res or half-res variant based on the
+    // target buffer's size. Used for both cur (always full) and next (half
+    // when no PSRAM, full otherwise).
+    auto load_image_into = [](int idx, uint16_t *dest, bool half_res) {
+        if (idx >= 0 && idx < g_emu_count && g_emus[idx].image_key[0]) {
+            bool ok = half_res
+                ? gui_load_image_half_res(g_emus[idx].image_key, dest)
+                : gui_load_image(g_emus[idx].image_key, dest);
+            if (ok) return;
+        }
+        if (half_res) gui_fill_solid_half_res(dest, 0);
+        else          gui_fill_solid(dest, 0);
+    };
+
+    auto enter_graphical = [&]() {
+        if (!buffers_ready) buffers_ready = gui_buffers_alloc();
+        if (!buffers_ready) {
+            LOG("GUI buffer allocation failed; staying in text mode.");
+            graphical_mode = false;
+            return;
+        }
+        load_image_into(sel, gui_buf_cur(), false);   // cur is always full res
+        slide_p   = 0;
+        slide_dir = 0;
+    };
+
+    // Restore the last mode the user left us in (file lives on the SD card).
+    graphical_mode = gui_load_mode(g_guimode_path);
+    LOG("Initial menu mode: %s", graphical_mode ? "graphical" : "text");
+    if (graphical_mode) enter_graphical();
+
+    for (;;) {
+        Frens::PaceFrames60fps(false, true);
+#if NES_PIN_CLK != -1
+        nespad_read_start();
+#endif
+        auto count =
+#if !HSTX
+        dvi_->getFrameCounter();
+#else
+        hstx_getframecounter();
+#endif
+        auto onOff = hw_divider_s32_quotient_inlined(count, 60) & 1;
+        Frens::blinkLed(onOff);
+#if NES_PIN_CLK != -1
+        nespad_read_finish();   // populates nespad_states[]
+#endif
+        tuh_task();
+#if WIIPAD_DELAYED_START and WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+        // Probe once per second (onOff toggles at 60 frames) so we pick up a
+        // pad that was plugged in after boot. wiipad_begin() is a no-op once
+        // connected.
+        if (!wiipad_is_connected() && onOff) {
+            wiipad_begin();
+        }
+#endif
         uint32_t btns = io::getCurrentGamePadState(0).buttons |
                         io::getCurrentGamePadState(1).buttons;
+        // nespad_states[] and wiipad_read() use their own bit layouts (NES
+        // bus order / Wii nunchuk layout). Translate them into the same
+        // io::GamePadState::Button bits the rest of this loop checks via Btn::*.
+#if NES_PIN_CLK != -1 || NES_PIN_CLK_1 != -1
+        auto nesToBtn = [](uint8_t s) -> uint32_t {
+            // nespad_states is LSB-first wire order (A clocked out first lands
+            // in bit 0): 0x01=A, 0x02=B, 0x04=Select, 0x08=Start, 0x10=Up,
+            // 0x20=Down, 0x40=Left, 0x80=Right. The header comment in
+            // pico_shared/nespad.cpp claims the reverse and is wrong --
+            // infonesPlus ORs nespad_states[] straight into a bitmask with
+            // A=1<<0..RIGHT=1<<7, which only works under this layout.
+            uint32_t b = 0;
+            if (s & 0x01) b |= Btn::A;
+            if (s & 0x02) b |= Btn::B;
+            if (s & 0x04) b |= Btn::SELECT;
+            if (s & 0x08) b |= Btn::START;
+            if (s & 0x10) b |= Btn::UP;
+            if (s & 0x20) b |= Btn::DOWN;
+            if (s & 0x40) b |= Btn::LEFT;
+            if (s & 0x80) b |= Btn::RIGHT;
+            return b;
+        };
+#endif
+#if NES_PIN_CLK != -1
+        btns |= nesToBtn(nespad_states[0]);
+#endif
+#if NES_PIN_CLK_1 != -1
+        btns |= nesToBtn(nespad_states[1]);
+#endif
+#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+        {
+            // wiipad_read() layout (see wiipad.cpp): A=1<<0, B=1<<1, SELECT=1<<2,
+            // START=1<<3, UP=1<<4, DOWN=1<<5, LEFT=1<<6, RIGHT=1<<7, X=1<<8, Y=1<<9.
+            uint16_t w = wiipad_read();
+            if (w & (1 << 0)) btns |= Btn::A;
+            if (w & (1 << 1)) btns |= Btn::B;
+            if (w & (1 << 2)) btns |= Btn::SELECT;
+            if (w & (1 << 3)) btns |= Btn::START;
+            if (w & (1 << 4)) btns |= Btn::UP;
+            if (w & (1 << 5)) btns |= Btn::DOWN;
+            if (w & (1 << 6)) btns |= Btn::LEFT;
+            if (w & (1 << 7)) btns |= Btn::RIGHT;
+            if (w & (1 << 8)) btns |= Btn::X;
+            if (w & (1 << 9)) btns |= Btn::Y;
+        }
+#endif
         uint32_t pushed = btns & ~prevButtons;
         prevButtons = btns;
 
-        if (pushed & Btn::UP)   {
-            if (sel > 0) { sel--; LOG("UP -> sel=%d (%s)", sel, g_labels[sel]); }
-        }
-        if (pushed & Btn::DOWN) {
-            if (sel < count - 1) { sel++; LOG("DOWN -> sel=%d (%s)", sel, g_labels[sel]); }
-        }
-        if (top > sel)              top = sel;
-        if (sel >= top + visible)   top = sel - visible + 1;
+        // Idle counter feeds the screensaver. Tick only while no button is
+        // pressed -- a held button is not "idle".
+        if (btns) idle_frames = 0;
+        else      idle_frames++;
 
-        if (pushed & Btn::B) {
-            char full[FF_MAX_LFN];
-            snprintf(full, sizeof(full), "%s/%s", g_emuDir, entries[sel].Path);
-            LOG("B pressed. Selected [%d] %s", sel, full);
-
-            // Pre-flight while the display is alive: reject anything that has no
-            // in-range program blocks (e.g. a standalone UF2 linked at 0x10000000).
-            LOG("Pre-flight validating UF2 (pass 1, no flash writes)...");
-            uf2_load_stats_t st;
-            uf2_load_result_t vr = uf2_validate_file(full, &st);
-            LOG("  result: %s", uf2_load_result_str(vr));
-            LOG("  blocks: total=%u  programmable=%u  skipped=%u",
-                (unsigned)st.total_blocks, (unsigned)st.programmed_blocks,
-                (unsigned)st.skipped_blocks);
-            if (st.programmed_blocks) {
-                unsigned span = st.highest_addr - st.lowest_addr;
-                LOG("  span:   0x%08X..0x%08X  (%u bytes, %u%% of partition)",
-                    (unsigned)st.lowest_addr, (unsigned)st.highest_addr,
-                    span, (unsigned)(100u * span / APP_PARTITION_SIZE));
-            }
-            if (vr != UF2_LOAD_OK) {
-                LOG("REJECTED: %s", uf2_load_result_str(vr));
-                showMessage("Cannot flash this file:", entries[sel].Path, uf2_load_result_str(vr));
-                idleFor(3000);
-                prevButtons = ~0u;   // require a fresh press after the message
+        if (ss_active) {
+            if (btns) {
+                // Any press exits. The press itself must NOT also drive
+                // navigation, A-launch, or SELECT-mode-toggle this frame --
+                // the user just meant "wake up". Setting prevButtons = ~0u
+                // prevents *future* frames from seeing this press as a fresh
+                // edge, and the `continue` below stops this frame's already-
+                // computed `pushed` (which still contains the wake button)
+                // from reaching the rest of the loop.
+                screensaver_free();
+                ss_active   = false;
+                idle_frames = 0;
+                prevButtons = ~0u;
                 continue;
+            } else {
+                screensaver_run_one_frame();
+                continue;   // skip nav + normal render while running
             }
+        } else if (!ss_unavailable && idle_frames >= SS_IDLE_THRESHOLD) {
+            if (screensaver_init()) ss_active = true;
+            else                    ss_unavailable = true;
+        }
 
-            // Commit: paint the "Flashing..." notice WHILE core1 is still
-            // alive (we need a few frames of it on screen before resetting
-            // core1 kills HSTX servicing), then quiesce core1 and flash.
-            // The screen will go blank for the ~1-2 seconds of the actual
-            // flash op -- progress is reported on UART instead. Live on-screen
-            // progress would need the framework's core1 to register a
-            // multicore_lockout_victim so we can park-and-resume it per flash
-            // op instead of resetting it; that's a pico_shared change.
-            LOG("Pre-flight OK. Committing to flash; resetting core1 and erasing/programming.");
-            showMessage("Flashing...", g_labels[sel], "Do not power off.");
-            DrawScreen(-1);
-            sleep_ms(500);   // let core1 push the notice out a few frames
+        // SELECT: toggle modes regardless. Persist so next boot lands the same way.
+        if (pushed & Btn::SELECT) {
+            graphical_mode = !graphical_mode;
+            LOG("SELECT -> mode=%s", graphical_mode ? "graphical" : "text");
+            gui_save_mode(g_guimode_path, graphical_mode);
+            if (graphical_mode) enter_graphical();
+        }
 
-            multicore_reset_core1();   // stop HSTX servicing before erasing flash
-            LOG("core1 reset; beginning flash sequence");
-
-            uf2_load_result_t r = uf2_load_file(full, &st, flashProgress);
-            if (r == UF2_LOAD_OK) {
-                LOG("Flash OK: %u blocks written to 0x%08X..0x%08X",
-                    (unsigned)st.programmed_blocks,
-                    (unsigned)st.lowest_addr, (unsigned)st.highest_addr);
-                logAppPartitionState("after flash");
-                if (!app_launch_present()) {
-                    LOG("ERROR: app_launch_present()=false after flash; refusing jump and rebooting.");
-                } else {
-                    LOG("Launching %s; bye!", g_labels[sel]);
-                    stdio_flush();
-                    app_launch_run();      // no return on success
-                    LOG("app_launch_run() returned unexpectedly; rebooting.");
+        // Mode-specific navigation.
+        if (graphical_mode && buffers_ready) {
+            if (slide_dir == 0) {
+                // Idle: a fresh LEFT/RIGHT picks the neighbour.
+                // Wraps around at the ends so the user can keep cycling.
+                // gui_buf_next() is NULL on SRAM-only builds (no PSRAM) --
+                // in that case we snap-load the new image instead of sliding.
+                bool right = (pushed & Btn::RIGHT) != 0;
+                bool left  = (pushed & Btn::LEFT)  != 0;
+                if ((right || left) && g_emu_count > 1) {
+                    sel = right ? (sel + 1) % g_emu_count
+                                : (sel + g_emu_count - 1) % g_emu_count;
+                    LOG("%s -> sel=%d (%s)",
+                        right ? "RIGHT" : "LEFT", sel, g_emus[sel].label);
+                    uint16_t *next_buf = gui_buf_next();
+                    if (next_buf) {
+                        load_image_into(sel, next_buf, gui_next_is_half_res());
+                        slide_dir = right ? +1 : -1;
+                        slide_p   = 0;
+                    } else {
+                        // No slide buffer at all: just reload cur with the new image.
+                        load_image_into(sel, gui_buf_cur(), false);
+                    }
                 }
             } else {
-                LOG("Flash FAILED: %s (after %u programmed, %u skipped)",
-                    uf2_load_result_str(r),
-                    (unsigned)st.programmed_blocks, (unsigned)st.skipped_blocks);
+                // Mid-slide: advance progress. Ignore further LEFT/RIGHT until done.
+                slide_p += GUI_SLIDE_PX_PER_FRAME;
+                if (slide_p > SCREENWIDTH) slide_p = SCREENWIDTH;
             }
-
-            // Flash failed, or the launch was refused: reboot to recover the
-            // menu cleanly (the resume check's app_launch_present() guard stops
-            // it from jumping into a half-written partition).
-            LOG("Rebooting bootloader to recover a clean state.");
-            stdio_flush();
-            watchdog_reboot(0, 0, 0);
-            for (;;) tight_loop_contents();
+        } else {
+            // Text mode (also the fallback when GUI buffers can't be allocated).
+            if (pushed & Btn::UP) {
+                if (sel > 0) { sel--; LOG("UP -> sel=%d (%s)", sel, g_emus[sel].label); }
+            }
+            if (pushed & Btn::DOWN) {
+                if (sel < g_emu_count - 1) {
+                    sel++; LOG("DOWN -> sel=%d (%s)", sel, g_emus[sel].label);
+                }
+            }
+            if (top > sel)              top = sel;
+            if (sel >= top + visible)   top = sel - visible + 1;
         }
 
-        drawMenu(entries, count, sel, top, visible);
-        DrawScreen(-1);
+        // A always launches the selected entry.
+        if (pushed & Btn::A) {
+            LOG("A pressed. sel=%d (%s) flashed_idx=%d emu_drift=%d aux=\"%s\"",
+                sel, g_emus[sel].label, g_flash_idx, (int)g_flash_drift,
+                g_emus[sel].aux_uf2);
+            bool emuDrift = (sel != g_flash_idx) || g_flash_drift;
+
+            // Acknowledge the press on screen BEFORE any SD I/O.
+            // computeAuxDrift() CRC-walks a possibly multi-MB aux .uf2 and
+            // flashAndLaunch() pre-flight-validates the whole emulator .uf2;
+            // on a slow card that is several seconds during which a frozen
+            // menu reads as a hang. emuDrift comes from state cached at scan
+            // time, so we already know whether this press flashes or just
+            // launches and can show the right message immediately.
+            const char *dispName = g_emus[sel].display_name[0] ?
+                                   g_emus[sel].display_name : g_emus[sel].label;
+            if (emuDrift) showMessage("Flashing", dispName, "Do not power off.");
+            else          showMessage("Starting", dispName, nullptr);
+            DrawScreen(-1);
+
+            uf2_fingerprint_t auxFp;
+            AuxState auxState = computeAuxDrift(sel, &auxFp);
+            bool flashAux = (auxState == AUX_DRIFT);
+
+            if (emuDrift || flashAux) {
+                flashAndLaunch(sel, emuDrift, flashAux, flashAux ? &auxFp : nullptr);
+            } else {
+                launchInFlash();
+            }
+            // If we get here, either the launch was refused or flash failed;
+            // both paths reboot the bootloader so we shouldn't actually reach
+            // this. Force a fresh button read just in case.
+            prevButtons = ~0u;
+        }
+
+        // Render.
+        if (graphical_mode && buffers_ready) {
+            // Rebuilt every frame so the A-button label tracks pad hot-plug
+            // (NES "A", XInput "B", DualShock "O", ...). gui only caches
+            // the pointer so the stack buffer must live across the call,
+            // which it does -- we set it immediately before gui_draw_frame.
+            char bl1[2], bl2[2];
+            getButtonLabels(bl1, bl2);
+            char footer[SCREEN_COLS + 1];
+            snprintf(footer, sizeof(footer),
+                     "LEFT/RIGHT:choose  %s:start  SELECT:text", bl1);
+            gui_set_footer(footer);
+            gui_draw_frame(gui_buf_cur(),
+                           slide_dir != 0 ? gui_buf_next() : nullptr,
+                           slide_p, slide_dir,
+                           gui_next_is_half_res());
+            if (slide_dir != 0 && slide_p >= SCREENWIDTH) {
+                if (gui_next_is_half_res()) {
+                    // Half-res slide: don't swap (next is a 160x120 scratch).
+                    // Reload cur at full res so the static display sharpens
+                    // back up. Brief snap from blocky to full-res is the
+                    // tradeoff for keeping the animation on no-PSRAM configs.
+                    load_image_into(sel, gui_buf_cur(), false);
+                } else {
+                    // Both buffers full-res: just swap pointers.
+                    gui_swap_buffers();
+                }
+                slide_dir = 0;
+                slide_p   = 0;
+            }
+        } else {
+            drawMenu(sel, top, visible);
+            DrawScreen(-1);
+        }
     }
 }
