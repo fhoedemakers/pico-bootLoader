@@ -8,10 +8,10 @@
 #   display_name  label shown in the picker
 #   aux_uf2       optional companion data .uf2 (UF2 family RP2350 DATA),
 #                 flashed alongside the app (e.g. Doom's WAD)
-picogenesisPlus;md;Sega Genesis/Mega Drive
 piconesPlus;nes;Nintendo Entertainment System
 picopcePlus;pce_cd;Nec Pc Engine
 PicoPeanutGB;gb_gbc;Nintendo Game Boy/Game Boy Color
 picosmsPlus;sms_gg;Sega Master System/Game Gear
+picogenesisPlus;md;Sega Genesis/Mega Drive
 picoPacPlus;videopac;Philips Videpac/Magnavox Odessey2
 doom_tiny;doom;Doom!;doom1-whx-for-fruitjam.uf2
