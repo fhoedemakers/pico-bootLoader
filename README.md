@@ -50,7 +50,7 @@ images](#auxiliary-data-images)).
 
 Additional emulators may be added over time.
 
-
+For board-by-board wiring, supported display modes and more refer to the [pico-infonesPlus documentation](https://github.com/fhoedemakers/pico-infonesPlus#setup). The set of supported boards and their pinouts is identical between the two projects.
 
 ## How it works
 
