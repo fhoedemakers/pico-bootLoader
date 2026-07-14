@@ -70,17 +70,28 @@ declare -A REPO_OF=(
     [doom_tiny]=fruitjam-doom
 )
 
-# fruitjam-doom (Doom!) is a special case. Unlike the emulators above it targets
-# a single board (Adafruit Fruit Jam / HW_CONFIG 8), has no release tags (built
-# from a branch), vendors its own pico-sdk/pico-extras as submodules, and uses a
-# bespoke build script that additionally emits a DATA-family WAD UF2. It is
+# fruitjam-doom (Doom!) is a special case. Unlike the emulators above it only
+# targets a handful of specific boards, has no release tags (built from a
+# branch), vendors its own pico-sdk/pico-extras as submodules, and uses a
+# per-board build script that additionally emits a DATA-family WAD UF2. It is
 # built by _build_doom() instead of the generic bld.sh path.
 DOOM_PROG="doom_tiny"
 DOOM_REPO="fruitjam-doom"
 DOOM_BRANCH="adafruit-fruitjam"
-DOOM_HWCONFIG=8
-DOOM_BUILD_SCRIPT="fruitjam-build-forbootloader.sh"
-DOOM_BUILD_SUBDIR="build_bl_fruitjam/src"
+# HW_CONFIG -> board "tag" used by fruitjam-doom's per-board build scripts. Each
+# tag <T> implies:  build script   <T>-build-forbootloader.sh
+#                   build output    build_bl_<T>/src/doom_tiny.uf2  (app)
+#                   WAD produced    build_bl_<T>/src/doom1-whx.uf2   ($DOOM_WAD)
+# The keys are exactly the configs Doom supports; any other config is skipped.
+declare -A DOOM_TAG=(
+    [2]=adafruitdvisd    # Adafruit DVI + MicroSD breakouts
+    [8]=fruitjam         # Adafruit Fruit Jam
+    [13]=murmulatorm2    # Murmulator M2
+    [14]=featherrp2350   # Adafruit Feather RP2350 + TLV320DAC3100
+)
+# WAD name the loader expects (emulators.txt aux_uf2 column). Every per-board
+# build script now emits the WAD under exactly this name.
+DOOM_WAD="doom1-whx.uf2"
 
 # Supported RP2350-ARM hwconfigs + descriptors from pico_shared/bld.sh case
 # statement. Configs 1, 2, 6, 11 are not Pico-2-only at the board level, but
@@ -295,10 +306,14 @@ else
 fi
 
 # --- Build fruitjam-doom (Doom!) ---------------------------------------------
-# Fruit Jam only. Clones the branch with its vendored SDK/extras submodules and
-# runs fruitjam-build-forbootloader.sh, which emits the app UF2 plus a DATA
-# family WAD UF2 in build_bl_fruitjam/src/. Installs both into emu/<hw>/ and
-# writes the same status contract as build_one_emulator().
+# Builds for whichever HW_CONFIGs appear in DOOM_TAG (2, 8, 13, 14); any other
+# config is skipped cleanly. Clones the branch with its vendored SDK/extras
+# submodules and runs <tag>-build-forbootloader.sh, which emits the app UF2 plus
+# a DATA-family WAD UF2 (both named identically across boards) in
+# build_bl_<tag>/src/. Installs the app as emu/<hw>/doom_tiny.uf2 and the WAD as
+# emu/<hw>/$DOOM_WAD, then writes the same status contract as
+# build_one_emulator(). The clone is reused across configs within one run — it
+# drags in a vendored pico-sdk, so re-cloning it per board would be wasteful.
 _build_doom() {
     local prog="$1" status_file="$2" t0="$3"
     local repo="$DOOM_REPO" branch="$DOOM_BRANCH"
@@ -306,15 +321,18 @@ _build_doom() {
     local url="https://github.com/${GITHUB_OWNER}/${repo}.git"
     local elapsed
 
-    # Only meaningful for the Fruit Jam config; skip cleanly for any other.
-    if [ "$HWCONFIG" != "$DOOM_HWCONFIG" ]; then
+    # Only the configs with a per-board build script get a Doom build.
+    local tag="${DOOM_TAG[$HWCONFIG]:-}"
+    if [ -z "$tag" ]; then
         elapsed=$(( SECONDS - t0 ))
-        echo "SKIP:doom_tiny only builds for HW_CONFIG=$DOOM_HWCONFIG (Fruit Jam)|$elapsed" > "$status_file"
+        echo "SKIP:doom_tiny not supported for HW_CONFIG=$HWCONFIG (Doom builds for: ${!DOOM_TAG[*]})|$elapsed" > "$status_file"
         return 0
     fi
+    local build_script="${tag}-build-forbootloader.sh"
+    local build_subdir="build_bl_${tag}"
 
     hr
-    echo " $prog  ($repo @ branch $branch)  [Fruit Jam / HW_CONFIG $DOOM_HWCONFIG only]"
+    echo " $prog  ($repo @ branch $branch)  [HW_CONFIG $HWCONFIG / $tag]"
     echo " clone -> $dest"
     hr
 
@@ -323,29 +341,47 @@ _build_doom() {
     local out_dir="$LOADER_DIR/emu/$HWCONFIG"
     mkdir -p "$out_dir"
     info "[$prog] removing any previous emu/$HWCONFIG/ Doom artifacts"
-    rm -f "$out_dir/${prog}.uf2"
+    rm -f "$out_dir/${prog}.uf2" "$out_dir/$DOOM_WAD"
     shopt -s nullglob
     local stale
-    for stale in "$out_dir"/*-for-fruitjam.uf2; do rm -f "$stale"; done
+    for stale in "$out_dir"/doom1-whx-for-*.uf2; do rm -f "$stale"; done
     shopt -u nullglob
 
-    info "[$prog] cleaning previous clone (if any)"
-    rm -rf "$dest"
-
-    info "[$prog] cloning ${repo}@${branch} (recursive: vendored pico-sdk/pico-extras)"
-    if ! git clone --branch "$branch" --recurse-submodules --depth 1 "$url" "$dest"; then
-        elapsed=$(( SECONDS - t0 ))
-        echo "FAIL:clone of ${repo}@${branch} failed|$elapsed" > "$status_file"
-        return 0
+    # Reuse an existing checkout of the right repo across configs: clone once,
+    # then fast-forward it to the branch tip for later boards. If the update
+    # fails for any reason, fall back to a clean clone.
+    if [ -d "$dest/.git" ] && \
+       [ "$(git -C "$dest" config --get remote.origin.url 2>/dev/null)" = "$url" ]; then
+        info "[$prog] reusing existing ${repo} clone; updating to ${branch} tip"
+        if ! ( cd "$dest" \
+                && git fetch --depth 1 origin "$branch" \
+                && git checkout -qB "$branch" FETCH_HEAD \
+                && git submodule update --init --recursive ); then
+            warn "[$prog] could not update existing clone; re-cloning from scratch"
+            rm -rf "$dest"
+        fi
     fi
+    if [ ! -d "$dest/.git" ]; then
+        info "[$prog] cleaning previous clone (if any)"
+        rm -rf "$dest"
+        info "[$prog] cloning ${repo}@${branch} (recursive: vendored pico-sdk/pico-extras)"
+        if ! git clone --branch "$branch" --recurse-submodules --depth 1 "$url" "$dest"; then
+            elapsed=$(( SECONDS - t0 ))
+            echo "FAIL:clone of ${repo}@${branch} failed|$elapsed" > "$status_file"
+            return 0
+        fi
+    fi
+    # Force a clean build tree for THIS board so a prior run can't leave stale
+    # objects behind (each board builds into its own build_bl_<tag>/).
+    rm -rf "$dest/$build_subdir"
 
     set +e
     (
         set -e
         cd "$dest"
-        chmod +x "$DOOM_BUILD_SCRIPT" 2>/dev/null || true
-        info "[$prog] running ./$DOOM_BUILD_SCRIPT"
-        "./$DOOM_BUILD_SCRIPT"
+        chmod +x "$build_script" 2>/dev/null || true
+        info "[$prog] running ./$build_script"
+        "./$build_script"
     )
     local rc=$?
     set -e
@@ -356,7 +392,7 @@ _build_doom() {
     fi
 
     info "[$prog] locating produced UF2s"
-    local src_dir="$dest/$DOOM_BUILD_SUBDIR"
+    local src_dir="$dest/$build_subdir/src"
     local app_uf2="$src_dir/doom_tiny.uf2"
     if [ ! -f "$app_uf2" ]; then
         elapsed=$(( SECONDS - t0 ))
@@ -364,16 +400,19 @@ _build_doom() {
         return 0
     fi
 
+    # Companion DATA-family WAD (emulators.txt aux_uf2), emitted under $DOOM_WAD
+    # by every per-board build script. Doom is unplayable without it, so a
+    # missing WAD is a build failure.
+    local aux_uf2="$src_dir/$DOOM_WAD"
+    if [ ! -f "$aux_uf2" ]; then
+        elapsed=$(( SECONDS - t0 ))
+        echo "FAIL:WAD $DOOM_WAD not produced by $build_script|$elapsed" > "$status_file"
+        return 0
+    fi
+
     cp "$app_uf2" "$out_dir/${prog}.uf2"
-    # Companion DATA-family WAD (emulators.txt aux_uf2); the build tags it
-    # *-for-fruitjam.uf2. Install alongside the app so the loader can flash it.
-    shopt -s nullglob
-    local aux
-    for aux in "$src_dir"/*-for-fruitjam.uf2; do
-        cp "$aux" "$out_dir/$(basename "$aux")"
-        info "[$prog] installed aux $(basename "$aux") -> emu/$HWCONFIG/"
-    done
-    shopt -u nullglob
+    cp "$aux_uf2" "$out_dir/$DOOM_WAD"
+    info "[$prog] installed WAD $(basename "$aux_uf2") -> emu/$HWCONFIG/$DOOM_WAD"
 
     local bytes
     bytes=$(stat -c%s "$out_dir/${prog}.uf2")
