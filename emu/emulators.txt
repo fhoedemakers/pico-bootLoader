@@ -16,3 +16,4 @@ picogenesisPlus;md;Sega Genesis/Mega Drive
 picoPacPlus;videopac;Philips Videpac/Magnavox Odessey2
 doom_tiny;doom;Doom!;doom1-whx-for-fruitjam.uf2
 doom_tiny_full;doom_full;Doom Full!
+picosnesPlus;snes;Super Nintendo/Famicom
