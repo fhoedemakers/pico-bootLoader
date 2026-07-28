@@ -992,13 +992,15 @@ int image_convert_batch_dir(const char *dir, uint16_t max_w, uint16_t max_h,
     int n_ok = 0;
     for (int i = 0; i < nqueue; i++) {
         if (fb) {
-            for (int y = 188; y < 200; y++) {
+            // Band starts at 190: the progress bar's percentage label occupies
+            // 182..189, so clearing any higher would clip its bottom rows.
+            for (int y = 190; y < 202; y++) {
                 uint16_t *row = fb + y * SCREENWIDTH;
                 for (int x = 0; x < SCREENWIDTH; x++) row[x] = COL_BG;
             }
             char shown[FF_MAX_LFN + 1];
             ic_truncate_for_display(queue[i], shown, SCREENWIDTH / FONT_CHAR_WIDTH);
-            ic_fb_draw_text_centered(fb, 190, shown, COL_FG, COL_BG);
+            ic_fb_draw_text_centered(fb, 192, shown, COL_FG, COL_BG);
             progress_bar_draw((uint32_t)i, (uint32_t)nqueue,
                               COL_FILL, COL_EMPTY, COL_BORDER);
         }
