@@ -615,17 +615,19 @@ void drawHelpScreen(bool graphical_mode, const char *index_file, bool cfg_save_f
     putText(3, 21, "Mode",  COL_FG, COL_BG);
     putText(18, 21, graphical_mode ? "graphical" : "text", COL_FG, COL_BG);
 
-    // "3 (have 0 1 3 7)" -- single spaces, so putText's collapsing is a no-op.
+    // "3 (2 of 4)" -- the theme number (what THEME= in boot.txt holds), then
+    // its position among the themes that exist. Listing every present theme
+    // instead ran to 28 characters with all ten on the card, overflowing both
+    // this buffer and the 22-cell description column. Worst case here is
+    // "9 (10 of 10)", 12 characters. Single spaces only: putText collapses
+    // whitespace runs, so wider padding would not survive anyway.
     {
-        char have[24];
-        size_t n = 0;
-        for (int t = 0; t < THEME_MAX && n + 2 < sizeof(have); t++) {
-            if (!themes_exists(t)) continue;
-            if (n) have[n++] = ' ';
-            have[n++] = (char)('0' + t);
+        const int active = themes_active();
+        int pos = 0;
+        for (int t = 0; t <= active && t < THEME_MAX; t++) {
+            if (themes_exists(t)) pos++;
         }
-        have[n] = '\0';
-        snprintf(val, sizeof(val), "%d (have %s)", themes_active(), have);
+        snprintf(val, sizeof(val), "%d (%d of %d)", active, pos, themes_count());
         putText(3,  22, "Theme", COL_FG, COL_BG);
         putText(18, 22, val,     COL_FG, COL_BG);
     }
