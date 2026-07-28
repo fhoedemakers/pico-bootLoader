@@ -67,21 +67,57 @@ declare -A REPO_OF=(
     [PicoPeanutGB]=pico-peanutGB
     [picosmsPlus]=pico-smsplus
     [picoPacPlus]=pico-pacPlus
+    [picosnesPlus]=pico-snesPlus
     [doom_tiny]=fruitjam-doom
+    [doom_tiny_full]=fruitjam-doom
 )
 
 # fruitjam-doom (Doom!) is a special case. Unlike the emulators above it only
 # targets a handful of specific boards, has no release tags (built from a
 # branch), vendors its own pico-sdk/pico-extras as submodules, and uses a
-# per-board build script that additionally emits a DATA-family WAD UF2. It is
-# built by _build_doom() instead of the generic bld.sh path.
-DOOM_PROG="doom_tiny"
+# per-board build script. It is built by _build_doom() instead of the generic
+# bld.sh path.
+#
+# Two variants ship from the same repo:
+#   doom_tiny       shareware, WHX baked into flash as a companion DATA UF2
+#                   (the emulators.txt aux_uf2 column)
+#   doom_tiny_full  registered/Ultimate DOOM; nothing extra in flash — at boot
+#                   the game copies /roms/doom/doom.whd from the SD card into
+#                   PSRAM, so the board must have PSRAM
+# They live on different branches, so each gets its own clone directory: a
+# shared one would thrash between branches and race when -j >1 builds both at
+# the same time (each drags in a vendored pico-sdk, hence the disk cost).
 DOOM_REPO="fruitjam-doom"
-DOOM_BRANCH="adafruit-fruitjam"
-# HW_CONFIG -> board "tag" used by fruitjam-doom's per-board build scripts. Each
-# tag <T> implies:  build script   <T>-build-forbootloader.sh
-#                   build output    build_bl_<T>/src/doom_tiny.uf2  (app)
-#                   WAD produced    build_bl_<T>/src/doom1-whx.uf2   ($DOOM_WAD)
+declare -A DOOM_BRANCH=(
+    [doom_tiny]=adafruit-fruitjam
+    [doom_tiny_full]=full-version
+)
+declare -A DOOM_CLONE_OF=(
+    [doom_tiny]=fruitjam-doom
+    [doom_tiny_full]=fruitjam-doom-full
+)
+# Per-variant build script and build tree, as printf formats over the board tag.
+declare -A DOOM_SCRIPT_FMT=(
+    [doom_tiny]="%s-build-forbootloader.sh"
+    [doom_tiny_full]="%s-build-full-forbootloader.sh"
+)
+declare -A DOOM_BUILD_FMT=(
+    [doom_tiny]="build_bl_%s"
+    [doom_tiny_full]="build_bl_full_%s"
+)
+# Companion DATA-family WAD UF2 the variant must produce (emulators.txt aux_uf2
+# column), or "" when it needs none. Every per-board build script that emits a
+# WAD emits it under exactly this name.
+declare -A DOOM_WAD_OF=(
+    [doom_tiny]="doom1-whx.uf2"
+    [doom_tiny_full]=""
+)
+# HW_CONFIG -> board "tag" used by fruitjam-doom's per-board build scripts, for
+# both variants. Each tag <T> implies, for a variant with script format <SF>,
+# build format <BF> and program name <P>:
+#                   build script   printf <SF> <T>
+#                   build output    printf <BF> <T>/src/<P>.uf2   (app)
+#                   WAD produced    printf <BF> <T>/src/${DOOM_WAD_OF[<P>]}
 # The keys are exactly the configs Doom supports; any other config is skipped.
 declare -A DOOM_TAG=(
     [2]=adafruitdvisd    # Adafruit DVI + MicroSD breakouts
@@ -89,9 +125,6 @@ declare -A DOOM_TAG=(
     [13]=murmulatorm2    # Murmulator M2
     [14]=featherrp2350   # Adafruit Feather RP2350 + TLV320DAC3100
 )
-# WAD name the loader expects (emulators.txt aux_uf2 column). Every per-board
-# build script now emits the WAD under exactly this name.
-DOOM_WAD="doom1-whx.uf2"
 
 # Supported RP2350-ARM hwconfigs + descriptors from pico_shared/bld.sh case
 # statement. Configs 1, 2, 6, 11 are not Pico-2-only at the board level, but
@@ -306,30 +339,34 @@ else
 fi
 
 # --- Build fruitjam-doom (Doom!) ---------------------------------------------
-# Builds for whichever HW_CONFIGs appear in DOOM_TAG (2, 8, 13, 14); any other
-# config is skipped cleanly. Clones the branch with its vendored SDK/extras
-# submodules and runs <tag>-build-forbootloader.sh, which emits the app UF2 plus
-# a DATA-family WAD UF2 (both named identically across boards) in
-# build_bl_<tag>/src/. Installs the app as emu/<hw>/doom_tiny.uf2 and the WAD as
-# emu/<hw>/$DOOM_WAD, then writes the same status contract as
-# build_one_emulator(). The clone is reused across configs within one run — it
-# drags in a vendored pico-sdk, so re-cloning it per board would be wasteful.
+# Handles both variants (doom_tiny, doom_tiny_full) — the per-variant branch,
+# build script, build tree and companion WAD all come from the DOOM_* tables
+# above. Builds for whichever HW_CONFIGs appear in DOOM_TAG (2, 8, 13, 14); any
+# other config is skipped cleanly. Clones the variant's branch with its vendored
+# SDK/extras submodules and runs its per-board build script, which emits the app
+# UF2 (and, for doom_tiny, a DATA-family WAD UF2) in <build tree>/src/. Installs
+# the app as emu/<hw>/<prog>.uf2 and the WAD, if any, as emu/<hw>/<wad>, then
+# writes the same status contract as build_one_emulator(). The clone is reused
+# across configs within one run — it drags in a vendored pico-sdk, so re-cloning
+# it per board would be wasteful.
 _build_doom() {
     local prog="$1" status_file="$2" t0="$3"
-    local repo="$DOOM_REPO" branch="$DOOM_BRANCH"
-    local dest="$BUILD_DIR/$repo"
+    local repo="$DOOM_REPO" branch="${DOOM_BRANCH[$prog]}"
+    local dest="$BUILD_DIR/${DOOM_CLONE_OF[$prog]}"
     local url="https://github.com/${GITHUB_OWNER}/${repo}.git"
+    local wad="${DOOM_WAD_OF[$prog]:-}"
     local elapsed
 
     # Only the configs with a per-board build script get a Doom build.
     local tag="${DOOM_TAG[$HWCONFIG]:-}"
     if [ -z "$tag" ]; then
         elapsed=$(( SECONDS - t0 ))
-        echo "SKIP:doom_tiny not supported for HW_CONFIG=$HWCONFIG (Doom builds for: ${!DOOM_TAG[*]})|$elapsed" > "$status_file"
+        echo "SKIP:$prog not supported for HW_CONFIG=$HWCONFIG (Doom builds for: ${!DOOM_TAG[*]})|$elapsed" > "$status_file"
         return 0
     fi
-    local build_script="${tag}-build-forbootloader.sh"
-    local build_subdir="build_bl_${tag}"
+    local build_script build_subdir
+    printf -v build_script "${DOOM_SCRIPT_FMT[$prog]}" "$tag"
+    printf -v build_subdir "${DOOM_BUILD_FMT[$prog]}" "$tag"
 
     hr
     echo " $prog  ($repo @ branch $branch)  [HW_CONFIG $HWCONFIG / $tag]"
@@ -337,22 +374,27 @@ _build_doom() {
     hr
 
     # Drop any artifacts from a previous run up front, so a failed rebuild can
-    # never leave a stale doom_tiny.uf2 (or its WAD) behind in emu/$HWCONFIG/.
+    # never leave a stale <prog>.uf2 (or its WAD) behind in emu/$HWCONFIG/. Only
+    # touch this variant's files: with -j >1 the other variant may be building
+    # into the same directory right now.
     local out_dir="$LOADER_DIR/emu/$HWCONFIG"
     mkdir -p "$out_dir"
-    info "[$prog] removing any previous emu/$HWCONFIG/ Doom artifacts"
-    rm -f "$out_dir/${prog}.uf2" "$out_dir/$DOOM_WAD"
-    shopt -s nullglob
-    local stale
-    for stale in "$out_dir"/doom1-whx-for-*.uf2; do rm -f "$stale"; done
-    shopt -u nullglob
+    info "[$prog] removing any previous emu/$HWCONFIG/ $prog artifacts"
+    rm -f "$out_dir/${prog}.uf2"
+    if [ -n "$wad" ]; then
+        rm -f "$out_dir/$wad"
+        shopt -s nullglob
+        local stale
+        for stale in "$out_dir"/doom1-whx-for-*.uf2; do rm -f "$stale"; done
+        shopt -u nullglob
+    fi
 
     # Reuse an existing checkout of the right repo across configs: clone once,
     # then fast-forward it to the branch tip for later boards. If the update
     # fails for any reason, fall back to a clean clone.
     if [ -d "$dest/.git" ] && \
        [ "$(git -C "$dest" config --get remote.origin.url 2>/dev/null)" = "$url" ]; then
-        info "[$prog] reusing existing ${repo} clone; updating to ${branch} tip"
+        info "[$prog] reusing existing clone at $dest; updating to ${branch} tip"
         if ! ( cd "$dest" \
                 && git fetch --depth 1 origin "$branch" \
                 && git checkout -qB "$branch" FETCH_HEAD \
@@ -371,9 +413,16 @@ _build_doom() {
             return 0
         fi
     fi
-    # Force a clean build tree for THIS board so a prior run can't leave stale
-    # objects behind (each board builds into its own build_bl_<tag>/).
+    # Force a clean build tree for THIS board+variant so a prior run can't leave
+    # stale objects behind (each combination has its own build tree).
     rm -rf "$dest/$build_subdir"
+
+    # Guard against a branch that doesn't carry this variant's scripts (yet).
+    if [ ! -f "$dest/$build_script" ]; then
+        elapsed=$(( SECONDS - t0 ))
+        echo "FAIL:$build_script not found in ${repo}@${branch}|$elapsed" > "$status_file"
+        return 0
+    fi
 
     set +e
     (
@@ -393,32 +442,40 @@ _build_doom() {
 
     info "[$prog] locating produced UF2s"
     local src_dir="$dest/$build_subdir/src"
-    local app_uf2="$src_dir/doom_tiny.uf2"
+    local app_uf2="$src_dir/${prog}.uf2"
     if [ ! -f "$app_uf2" ]; then
         elapsed=$(( SECONDS - t0 ))
         echo "MISSING|$elapsed" > "$status_file"
         return 0
     fi
 
-    # Companion DATA-family WAD (emulators.txt aux_uf2), emitted under $DOOM_WAD
-    # by every per-board build script. Doom is unplayable without it, so a
-    # missing WAD is a build failure.
-    local aux_uf2="$src_dir/$DOOM_WAD"
-    if [ ! -f "$aux_uf2" ]; then
-        elapsed=$(( SECONDS - t0 ))
-        echo "FAIL:WAD $DOOM_WAD not produced by $build_script|$elapsed" > "$status_file"
-        return 0
+    # Companion DATA-family WAD (emulators.txt aux_uf2), for the variants that
+    # bake one into flash. Those variants are unplayable without it, so a missing
+    # WAD is a build failure. doom_tiny_full has none: it reads the full WHD off
+    # the SD card at boot.
+    local aux_uf2=""
+    if [ -n "$wad" ]; then
+        aux_uf2="$src_dir/$wad"
+        if [ ! -f "$aux_uf2" ]; then
+            elapsed=$(( SECONDS - t0 ))
+            echo "FAIL:WAD $wad not produced by $build_script|$elapsed" > "$status_file"
+            return 0
+        fi
     fi
 
     cp "$app_uf2" "$out_dir/${prog}.uf2"
-    cp "$aux_uf2" "$out_dir/$DOOM_WAD"
-    info "[$prog] installed WAD $(basename "$aux_uf2") -> emu/$HWCONFIG/$DOOM_WAD"
+    if [ -n "$wad" ]; then
+        cp "$aux_uf2" "$out_dir/$wad"
+        info "[$prog] installed WAD $(basename "$aux_uf2") -> emu/$HWCONFIG/$wad"
+    else
+        info "[$prog] no companion WAD: reads /roms/doom/doom.whd off the SD card at boot"
+    fi
 
     local bytes
     bytes=$(stat -c%s "$out_dir/${prog}.uf2")
-    info "[$prog] installed doom_tiny.uf2 -> emu/$HWCONFIG/${prog}.uf2  ($(human_size "$bytes"))"
+    info "[$prog] installed ${prog}.uf2 -> emu/$HWCONFIG/${prog}.uf2  ($(human_size "$bytes"))"
     elapsed=$(( SECONDS - t0 ))
-    echo "BUILT:doom_tiny.uf2|$bytes|$elapsed" > "$status_file"
+    echo "BUILT:${prog}.uf2|$bytes|$elapsed" > "$status_file"
 }
 
 # --- Build one emulator (used both serially and in parallel) -----------------
@@ -433,9 +490,9 @@ build_one_emulator() {
     local t0 elapsed
     t0=$SECONDS
 
-    # fruitjam-doom builds nothing like the others (single board, vendored SDK,
-    # its own script, extra WAD UF2). Hand it off entirely.
-    if [ "$prog" = "$DOOM_PROG" ]; then
+    # fruitjam-doom builds nothing like the others (a few specific boards,
+    # vendored SDK, its own script, extra WAD UF2). Hand it off entirely.
+    if [ -n "${DOOM_BRANCH[$prog]+x}" ]; then
         _build_doom "$prog" "$status_file" "$t0"
         return 0
     fi
@@ -566,9 +623,9 @@ build_one_emulator() {
 
     info "[$prog] locating produced UF2"
     shopt -s nullglob
-    local matches=("$dest"/releases/"${prog}"_*_bl.uf2)
+    local matches=("$dest"/releases_bl/"${prog}"_*_bl.uf2)
     if [ ${#matches[@]} -eq 0 ]; then
-        matches=("$dest"/releases/"${prog}"_*.uf2)
+        matches=("$dest"/releases_bl/"${prog}"_*.uf2)
     fi
     shopt -u nullglob
     if [ ${#matches[@]} -eq 0 ]; then
