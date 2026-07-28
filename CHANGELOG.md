@@ -1,6 +1,42 @@
 # CHANGELOG
 
-Initial release of a resident .uf2 bootloader / front-end for the RP2350 retro-emulator family (pico-infonesPlus, pico-pcePlus, pico-genesisPlus, pico-smsplus, pico-peanutGB, …).
+A resident .uf2 bootloader / front-end for the RP2350 retro-emulator family (pico-infonesPlus, pico-pcePlus, pico-genesisPlus, pico-smsplus, pico-peanutGB, …).
+
+## v0.2
+
+### Added
+
+- **Artwork themes.** The graphical menu can carry up to ten sets of artwork in
+  `<BASEDIR>/assets/themes/0` … `themes/9`. Press **UP** or **DOWN** in the
+  graphical menu to cycle through the themes present on the card; the choice is
+  saved immediately and restored on the next boot. A theme need not be
+  complete — any application it has no image for falls back to theme 0.
+- **On-screen help.** Press **START** in either menu mode for a full-screen
+  summary of the controls, the meaning of the `*` and `!` markers, and the
+  current mode, theme, board configuration and index file.
+- **`GUI` and `THEME` keys in `boot.txt`**, holding the menu mode and the active
+  theme.
+
+### Changed
+
+- **Menu artwork moved** from `<BASEDIR>/assets` to
+  `<BASEDIR>/assets/themes/0`. Existing cards are migrated automatically on the
+  first boot — the cached `.444`/`.555` files move too, so nothing is
+  re-converted, and the `screensaver/` folder is left where it is. The move is
+  resumable if it is interrupted.
+- **`boot.txt` is now written by the bootloader.** Only the `GUI=` and `THEME=`
+  lines are rewritten; comments, ordering, spacing and every other key are
+  preserved. The file is created on the first change if it does not exist,
+  carrying the effective value of all keys. Updates go through a temporary file
+  that is re-parsed before being renamed into place, so a power cut cannot
+  corrupt the configuration. A card that cannot be written is not an error: the
+  change applies for the session and the help screen says it was not saved.
+- **The `.guimode` file is gone**, folded into `boot.txt`'s `GUI` key. An
+  existing `.guimode` is read once, migrated, and deleted.
+- Menu footer and text-mode hints updated for the new controls.
+- Boards without PSRAM now convert artwork for *every* theme at boot rather than
+  one folder, since the converter cannot run once the menu is up. The first boot
+  after adding a theme is correspondingly slower.
 
 ## General Info
 

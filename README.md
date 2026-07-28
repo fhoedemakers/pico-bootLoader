@@ -1,5 +1,9 @@
 # pico-bootLoader
 
+[![pico-bootLoader in action](https://img.youtube.com/vi/X-7ZBaCIoeQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=X-7ZBaCIoeQ&t=39s)
+
+*Click the image to watch pico-bootLoader in action.*
+
 pico-bootLoader is a bootloader for RP2350 boards. Its primary purpose is to
 host a collection of retro-game emulators and a port of *Doom* on a single
 board and to let the user choose which one to run from an on-screen menu,
@@ -101,11 +105,16 @@ Classic controller (over I²C) are also supported and use their own buttons.
 |---|---|---|
 | Move through the list (text mode) | D-pad UP / DOWN | ↑ / ↓ |
 | Slide between applications (graphical mode) | D-pad LEFT / RIGHT | ← / → |
+| Change artwork theme (graphical mode) | D-pad UP / DOWN | ↑ / ↓ |
 | Launch the selected application | A | Z |
 | Toggle text / graphical mode | SELECT | A |
+| Open the help screen | START | S |
 | Wake from screensaver | any button | any mapped key |
 
-The chosen menu mode is remembered across boots. Inside a running emulator built
+START is used for the help screen because it is the only spare button present
+on every supported input device, including NES controllers.
+
+The chosen menu mode and artwork theme are remembered across boots. Inside a running emulator built
 on the shared framework, **SELECT + START** opens its menu, which offers *Return
 to emulator selection* to reboot back into this menu.
 
@@ -156,13 +165,13 @@ serves both kinds — artwork is cached in both pixel formats (see
 ## SD card layout
 
 ```
-/boot.txt                            optional configuration (defaults apply if absent)
-/emu/                                BASEDIR (default /emu, override in boot.txt)
-/emu/<HW_CONFIG>/*.uf2               applications for this board (e.g. /emu/8/)
-/emu/emulators.txt                   the index / allow-list (name set by INDEX)
-/emu/assets/<image_key>.png|.jpg     menu artwork, converted on first use
-/emu/assets/screensaver/*.png|.jpg   screensaver images (optional)
-/emu/.guimode                        persisted menu mode (created automatically)
+/boot.txt                                  configuration (created/updated by the menu)
+/emu/                                      BASEDIR (default /emu, override in boot.txt)
+/emu/<HW_CONFIG>/*.uf2                     applications for this board (e.g. /emu/8/)
+/emu/emulators.txt                         the index / allow-list (name set by INDEX)
+/emu/assets/themes/0/<image_key>.png|.jpg  default artwork theme, converted on first use
+/emu/assets/themes/1..9/                   optional extra themes (UP/DOWN to switch)
+/emu/assets/screensaver/*.png|.jpg         screensaver images (optional, not themed)
 ```
 
 Applications live in a subfolder named after the board's `HW_CONFIG` number, so
@@ -170,9 +179,8 @@ one card can carry builds for several boards side by side.
 
 ### Configuration (`boot.txt`)
 
-An optional file in the **root** of the SD card. If it is absent, the defaults
-below apply. A commented sample ships in the repository root:
-[`boot.txt`](boot.txt).
+A file in the **root** of the SD card. If it is absent, the defaults below
+apply. A commented sample ships in the repository root: [`boot.txt`](boot.txt).
 
 - One `KEY=VALUE` per line; whitespace around `=` and the value is trimmed.
 - Lines starting with `#` or `;` are comments; blank lines are ignored.
@@ -186,10 +194,26 @@ below apply. A commented sample ships in the repository root:
 | `BASEDIR` | `/emu` | Absolute SD path (must start with `/`, max 63 characters) under which everything lives: application folders, the index, artwork, screensaver images. |
 | `INDEX` | `emulators.txt` | Bare file name (no slashes) of the index file inside `BASEDIR`. |
 | `SCREENSAVER` | see note | `STARFIELD` — images fly outward from the screen centre, growing toward the camera. `BLOCKS` — images float and bounce off the edges; the on-screen set is re-picked every 15 s. The screensaver starts after ~30 s of inactivity and any button press exits it. |
+| `GUI` | `1` | `0` = text menu, `1` = graphical menu. Rewritten whenever SELECT toggles the mode. Replaces the `.guimode` file used by earlier releases, which is migrated and deleted automatically. |
+| `THEME` | `0` | Active artwork theme, `0`–`9` — see [Artwork themes](#artwork-themes). Rewritten whenever UP/DOWN changes the theme in graphical mode. A theme that is not on the card falls back to `0`. |
 
 > **Screensaver default.** When `/boot.txt` is *absent* the default is
 > `STARFIELD`; when the file is *present* but the key is omitted, it is
 > `BLOCKS`. Set the key explicitly if the choice matters.
+
+**The bootloader writes this file.** Changing the menu mode or the artwork
+theme rewrites the corresponding `GUI=` / `THEME=` line. Nothing else is
+touched: comments, blank lines, key order, spacing and any other keys are
+copied through unchanged, so the file stays yours to edit. If `/boot.txt` does
+not exist, the first such change creates it with the current effective value of
+*every* key — `SCREENSAVER` included, so that materialising the file cannot
+quietly change the screensaver through the asymmetry noted above.
+
+Updates are written to `/boot.txt.tmp`, re-parsed to confirm they are valid,
+and only then renamed into place; if a power cut interrupts the rename, the
+next boot adopts the `.tmp`. A card that cannot be written to (write-protected
+or full) is not an error — the change applies for the session and the help
+screen reports that it was not saved.
 
 ### The index file (allow-list)
 
@@ -226,11 +250,12 @@ doom_tiny       ; doom      ; Doom!                     ; doom1-whx-for-fruitjam
 
 Ordinary images are placed on the card and converted by the bootloader itself:
 
-- **Menu artwork** — `<BASEDIR>/assets/<image_key>.png|.jpg|.jpeg`, one per index
-  row, shown full-screen in graphical mode.
+- **Menu artwork** — `<BASEDIR>/assets/themes/<N>/<image_key>.png|.jpg|.jpeg`,
+  one per index row, shown full-screen in graphical mode. `<N>` is the theme
+  number; theme `0` is the default — see [Artwork themes](#artwork-themes).
 - **Screensaver images** — any `*.png|.jpg|.jpeg` in
   `<BASEDIR>/assets/screensaver/` (file names do not matter; more images give
-  more variety).
+  more variety). These are **not** themed.
 
 On first use each source image is converted and cached next to it as
 `<name>.444` (RGB444, used by PicoDVI boards) and `<name>.555` (RGB555, used by
@@ -252,9 +277,50 @@ not retried on every boot. Re-export as baseline/non-interlaced 8-bit and copy
 again.
 
 Boards **with PSRAM** convert images lazily, as they first appear on screen.
-Boards **without PSRAM** convert everything in one batch during boot — the first
-boot after adding images takes noticeably longer, after which the cache makes it
-immediate.
+Boards **without PSRAM** convert everything in one batch during boot, **for
+every theme on the card, not just the active one** — the converter needs SRAM
+that is no longer free once the menu is running, so a theme cannot be converted
+at the moment you switch to it. The first boot after adding images takes
+noticeably longer, after which the cache makes it immediate.
+
+### Artwork themes
+
+The graphical menu can carry up to ten sets of artwork. Each is a folder:
+
+```
+/emu/assets/themes/0/     theme 0 — the default, and the fallback
+/emu/assets/themes/1/     theme 1
+...                       up to theme 9
+```
+
+A theme folder holds one image per application, named after the `image_key`
+from the index file — so a theme might contain `nes.png`, `md.png`, `doom.png`.
+Only the folders that exist are used; the numbers need not be contiguous.
+
+**Switching** — press UP or DOWN in the graphical menu. Only themes that are
+actually on the card are reachable, so with themes `0`, `1` and `3` present,
+UP/DOWN cycles `0 → 1 → 3 → 0`. The choice is saved to `THEME=` in
+[`/boot.txt`](#configuration-boottxt) immediately and restored on the next boot.
+UP/DOWN keep their usual meaning (choosing an application) in text mode, where
+artwork is not shown.
+
+**Incomplete themes are fine.** An application the active theme has no image for
+falls back to theme 0's image, and to a black screen if theme 0 has none either.
+A theme can therefore restyle just a few entries.
+
+**Existing cards are migrated automatically.** Releases before v0.2 kept menu
+artwork loose in `<BASEDIR>/assets`. On the first boot the bootloader creates
+`assets/themes/0` and moves those image files into it — including the cached
+`.444`/`.555` files, so nothing has to be re-converted. The `screensaver/`
+folder and any other subfolder are left alone, as are files that are not
+images. The move is resumable: if it is interrupted, the next boot finishes it.
+
+### On-screen help
+
+Press **START** in either menu mode for a full-screen summary of the controls,
+the meaning of the `*` and `!` markers, and the current mode, theme, board
+configuration and index file. Press START, the launch button, B or SELECT to
+return. It is also where a failed configuration write is reported.
 
 ## Creating a bootable build of your own application
 
@@ -313,9 +379,11 @@ display name. See [The index file](#the-index-file-allow-list).
 
 ### 3. Add images for the menu and screensaver
 
-- **Menu image** — place `assets/<image_key>.png` (or `.jpg`/`.jpeg`) in
-  `<BASEDIR>/assets/`, using the `image_key` from the index row. It is shown
-  full-screen in graphical mode.
+- **Menu image** — place `<image_key>.png` (or `.jpg`/`.jpeg`) in
+  `<BASEDIR>/assets/themes/0/`, using the `image_key` from the index row. It is
+  shown full-screen in graphical mode. Add the same file name to any other
+  `themes/<N>/` folder to give the application a different look in that theme;
+  themes you skip fall back to this one.
 - **Screensaver images** — place any `*.png|.jpg|.jpeg` in
   `<BASEDIR>/assets/screensaver/`.
 
@@ -371,8 +439,12 @@ make -j
 
 The wrapper `./bld.sh -2 -c <HW_CONFIG>` performs the same build (add `-w` for
 Pico 2 W). `./buildAll.sh` builds every supported board into `releases/`
-(requires `picotool`). The resulting binary is a few hundred KB, well inside the
-512 KB bootloader region.
+(requires `picotool`).
+
+The image must fit the 512 KB bootloader region; the linker errors out if it
+does not, and every link prints its occupancy. Most configurations sit near
+260 KB (~51%), but the Pico 2 W builds pull in the CYW43 driver and land around
+483 KB (~92%) — that is the configuration to check when adding code.
 
 To build the emulators and the *Doom* port themselves,
 [`build_emulators.sh`](build_emulators.sh) clones each source repository and

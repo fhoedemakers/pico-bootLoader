@@ -61,6 +61,7 @@ extern "C" {
 #include "emulators_txt.h"
 #include "uf2_crc.h"
 #include "gui.h"
+#include "themes.h"
 #include "screensaver.h"
 #include "progress_bar.h"
 #include "sd_boot_ini.h"
@@ -242,7 +243,11 @@ void drawMenu(int sel, int top, int visible)
     centerText(SCREEN_ROWS - 4, "* in flash    ! SD differs (reflash)",
                COL_FG, COL_BG);
     centerText(SCREEN_ROWS - 3, "UP / DOWN : choose   SELECT : graphical", COL_FG, COL_BG);
-    snprintf(hint, sizeof(hint), "%s : start", buttonLabel1);
+    // '_' rather than spaces for the gap: putText collapses whitespace runs,
+    // so a space-padded string would render shorter than centerText measured
+    // it with strlen() and the line would sit off-centre. putText turns '_'
+    // back into a literal space (menu.cpp:598).
+    snprintf(hint, sizeof(hint), "%s : start____START : help", buttonLabel1);
     centerText(SCREEN_ROWS - 2, hint, COL_FG, COL_BG);
 }
 
@@ -368,22 +373,28 @@ static void overlayErrorDecor()
 // Charcell layout. Avoids rows 0..1 and 28..29 since those get overwritten
 // by the stripe overlay. Title and "Press RESET" use the same red bg as the
 // FB-direct red so the layers blend rather than clash.
+// Paint a full-width solid background row.
+//
+// putText() collapses consecutive whitespace -- a 40-space string ends up
+// writing only one cell, leaving the rest of the row untouched. Use '_' so
+// each cell is treated as a non-space character; putText converts it back to
+// a literal space at write time (menu.cpp:598), giving us a proper solid-bg
+// row with no visible characters.
+void solidBar(int row, int fg, int bg)
+{
+    char bar[SCREEN_COLS + 1];
+    memset(bar, '_', SCREEN_COLS);
+    bar[SCREEN_COLS] = '\0';
+    putText(0, row, bar, fg, bg);
+}
+
 void drawErrorScreen(const char *title, const char *l1, const char *l2, const char *l3)
 {
     ClearScreen(COL_BG);
 
-    // putText() collapses consecutive whitespace -- a 40-space string ends up
-    // writing only one cell, leaving the rest of the row untouched. Use '_'
-    // so each cell is treated as a non-space character; putText converts it
-    // back to a literal space at write time (menu.cpp:596), giving us a
-    // proper solid-bg row with no visible characters.
-    char bar[SCREEN_COLS + 1];
-    memset(bar, '_', SCREEN_COLS);
-    bar[SCREEN_COLS] = '\0';
-
     // Title bar: solid red row with white centered title. Sits below the
     // bottom edge of the warning disk (which lands around scanline 38 ~= row 4).
-    putText(0, 5, bar, COL_ERR_FG, COL_ERR_BG);
+    solidBar(5, COL_ERR_FG, COL_ERR_BG);
     if (title) centerText(5, title, COL_ERR_FG, COL_ERR_BG);
 
     // ASCII box around the three message lines (rows 10..14).
@@ -408,7 +419,7 @@ void drawErrorScreen(const char *title, const char *l1, const char *l2, const ch
     }
 
     // "Press RESET" bar: another solid red row above the bottom stripe band.
-    putText(0, 21, bar, COL_ERR_FG, COL_ERR_BG);
+    solidBar(21, COL_ERR_FG, COL_ERR_BG);
     centerText(21, "Press RESET to retry", COL_ERR_FG, COL_ERR_BG);
 }
 
@@ -445,6 +456,219 @@ void drawErrorScreen(const char *title, const char *l1, const char *l2, const ch
         tuh_task();
         if (!persistentFB) DrawScreen(-1);  // line-stream needs every frame
         sleep_ms(16);
+    }
+}
+
+// One frame's worth of input, merged from every source the board has, in
+// io::GamePadState::Button bits. Paces to 60 fps, pumps USB, blinks the
+// onboard LED, and hot-plug-probes the Wii pad -- i.e. this is the whole
+// per-frame housekeeping, not just the button read.
+//
+// Shared by the picker loop and the help screen; edge detection
+// (pushed = btns & ~prev) stays with each caller since they track their own
+// prevButtons. The nespad_read_start() / _finish() bracket keeps its original
+// spacing: the frame-counter and LED work sits between them so the PIO shift
+// register has time to clock out before we block on the result.
+uint32_t readPads()
+{
+    using Btn = io::GamePadState::Button;
+
+    Frens::PaceFrames60fps(false, true);
+#if NES_PIN_CLK != -1
+    nespad_read_start();
+#endif
+    auto count =
+#if !HSTX
+    dvi_->getFrameCounter();
+#else
+    hstx_getframecounter();
+#endif
+    auto onOff = hw_divider_s32_quotient_inlined(count, 60) & 1;
+    Frens::blinkLed(onOff);
+#if NES_PIN_CLK != -1
+    nespad_read_finish();   // populates nespad_states[]
+#endif
+    tuh_task();
+#if WIIPAD_DELAYED_START and WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+    // Probe once per second (onOff toggles at 60 frames) so we pick up a
+    // pad that was plugged in after boot. wiipad_begin() is a no-op once
+    // connected.
+    if (!wiipad_is_connected() && onOff) {
+        wiipad_begin();
+    }
+#endif
+    uint32_t btns = io::getCurrentGamePadState(0).buttons |
+                    io::getCurrentGamePadState(1).buttons;
+    // nespad_states[] and wiipad_read() use their own bit layouts (NES
+    // bus order / Wii nunchuk layout). Translate them into the same
+    // io::GamePadState::Button bits the callers check via Btn::*.
+#if NES_PIN_CLK != -1 || NES_PIN_CLK_1 != -1
+    auto nesToBtn = [](uint8_t s) -> uint32_t {
+        // nespad_states is LSB-first wire order (A clocked out first lands
+        // in bit 0): 0x01=A, 0x02=B, 0x04=Select, 0x08=Start, 0x10=Up,
+        // 0x20=Down, 0x40=Left, 0x80=Right. The header comment in
+        // pico_shared/nespad.cpp claims the reverse and is wrong --
+        // infonesPlus ORs nespad_states[] straight into a bitmask with
+        // A=1<<0..RIGHT=1<<7, which only works under this layout.
+        uint32_t b = 0;
+        if (s & 0x01) b |= Btn::A;
+        if (s & 0x02) b |= Btn::B;
+        if (s & 0x04) b |= Btn::SELECT;
+        if (s & 0x08) b |= Btn::START;
+        if (s & 0x10) b |= Btn::UP;
+        if (s & 0x20) b |= Btn::DOWN;
+        if (s & 0x40) b |= Btn::LEFT;
+        if (s & 0x80) b |= Btn::RIGHT;
+        return b;
+    };
+#endif
+#if NES_PIN_CLK != -1
+    btns |= nesToBtn(nespad_states[0]);
+#endif
+#if NES_PIN_CLK_1 != -1
+    btns |= nesToBtn(nespad_states[1]);
+#endif
+#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
+    {
+        // wiipad_read() layout (see wiipad.cpp): A=1<<0, B=1<<1, SELECT=1<<2,
+        // START=1<<3, UP=1<<4, DOWN=1<<5, LEFT=1<<6, RIGHT=1<<7, X=1<<8, Y=1<<9.
+        uint16_t w = wiipad_read();
+        if (w & (1 << 0)) btns |= Btn::A;
+        if (w & (1 << 1)) btns |= Btn::B;
+        if (w & (1 << 2)) btns |= Btn::SELECT;
+        if (w & (1 << 3)) btns |= Btn::START;
+        if (w & (1 << 4)) btns |= Btn::UP;
+        if (w & (1 << 5)) btns |= Btn::DOWN;
+        if (w & (1 << 6)) btns |= Btn::LEFT;
+        if (w & (1 << 7)) btns |= Btn::RIGHT;
+        if (w & (1 << 8)) btns |= Btn::X;
+        if (w & (1 << 9)) btns |= Btn::Y;
+    }
+#endif
+    return btns;
+}
+
+// --- Help screen ------------------------------------------------------------
+
+// NesMenuPalette indices. 0x16 is a NES red for section headings; the title /
+// footer bars reuse a blue-on-white pairing so they read as chrome rather than
+// as an error (which owns the red bars).
+#define COL_HELP_HDR   0x16
+#define COL_BAR_FG     0x30
+#define COL_BAR_BG     0x02
+
+// Static rows of the help page. Two columns because putText() collapses
+// whitespace runs -- a single string with padding between key and description
+// would render with the gap squeezed to one space. col 1 marks a section
+// heading (drawn in COL_HELP_HDR), col 3 / col 18 are the key / description
+// columns. Rows needing runtime state are painted separately below.
+struct HelpLine { uint8_t row, col; const char *text; };
+
+const HelpLine HELP_BODY[] = {
+    { 2,  1, "TEXT MODE" },
+    { 3,  3, "UP / DOWN" },      { 3,  18, "select application" },
+    { 5,  3, "SELECT" },         { 5,  18, "switch to graphics" },
+    { 6,  3, "START" },          { 6,  18, "this help screen" },
+
+    { 8,  1, "GRAPHICAL MODE" },
+    { 9,  3, "LEFT / RIGHT" },   { 9,  18, "select application" },
+    { 10, 3, "UP / DOWN" },      { 10, 18, "change artwork theme" },
+    { 12, 3, "SELECT" },         { 12, 18, "switch to text mode" },
+    { 13, 3, "START" },          { 13, 18, "this help screen" },
+
+    { 15, 1, "LIST MARKERS" },
+    { 16, 3, "*" },              { 16, 18, "in flash, up to date" },
+    { 17, 3, "!" },              { 17, 18, "in flash, SD differs" },
+    { 18, 18, "- starts by reflashing" },
+
+    { 20, 1, "STATUS" },
+    { 26, 3, "Screensaver: after 30 s idle." },
+    { 27, 3, "Any button wakes it." },
+};
+
+// Paint the help page into the charcell layer. Pure charcell on purpose: it
+// renders identically on all three backends and reuses the screenBuffer that
+// is already allocated, so the screen costs no extra RAM.
+void drawHelpScreen(bool graphical_mode, const char *index_file, bool cfg_save_failed)
+{
+    ClearScreen(COL_BG);
+
+    char btn1[2], btn2[2];
+    getButtonLabels(btn1, btn2);
+
+    solidBar(0, COL_BAR_FG, COL_BAR_BG);
+    centerText(0, "HELP - RP2350 bootloader " SWVERSION, COL_BAR_FG, COL_BAR_BG);
+
+    for (const HelpLine &h : HELP_BODY) {
+        putText(h.col, h.row, h.text, h.col == 1 ? COL_HELP_HDR : COL_FG, COL_BG);
+    }
+
+    // The launch button's label follows the attached pad ("A" on NES, "B" on
+    // XInput, "O" on DualShock, "Z" on a keyboard), so these two rows can't
+    // live in the static table.
+    for (int row : { 4, 11 }) {
+        putText(3,  row, btn1,                 COL_FG, COL_BG);
+        putText(18, row, "start selected app", COL_FG, COL_BG);
+    }
+
+    char val[28];
+    putText(3, 21, "Mode",  COL_FG, COL_BG);
+    putText(18, 21, graphical_mode ? "graphical" : "text", COL_FG, COL_BG);
+
+    // "3 (have 0 1 3 7)" -- single spaces, so putText's collapsing is a no-op.
+    {
+        char have[24];
+        size_t n = 0;
+        for (int t = 0; t < THEME_MAX && n + 2 < sizeof(have); t++) {
+            if (!themes_exists(t)) continue;
+            if (n) have[n++] = ' ';
+            have[n++] = (char)('0' + t);
+        }
+        have[n] = '\0';
+        snprintf(val, sizeof(val), "%d (have %s)", themes_active(), have);
+        putText(3,  22, "Theme", COL_FG, COL_BG);
+        putText(18, 22, val,     COL_FG, COL_BG);
+    }
+
+    putText(3,  23, "Config", COL_FG, COL_BG);
+    putText(18, 23, g_emuDir, COL_FG, COL_BG);
+    putText(3,  24, "Index",  COL_FG, COL_BG);
+    putText(18, 24, index_file ? index_file : "", COL_FG, COL_BG);
+
+    if (cfg_save_failed) {
+        putText(3, 25, "Settings not saved - SD write failed",
+                COL_ERR_FG, COL_ERR_BG);
+    }
+
+    solidBar(28, COL_BAR_FG, COL_BAR_BG);
+    snprintf(val, sizeof(val), "Press START or %s to return", btn1);
+    centerText(28, val, COL_BAR_FG, COL_BAR_BG);
+}
+
+// Show the help page until the user dismisses it.
+//
+// Unlike fatalErrorScreen(), this redraws every frame on every backend. The
+// flicker rule documented above applies to screens that alternate a charcell
+// pass with an FB-direct pass -- the gap between the two is what tears. The
+// help page has no FB-direct layer, so a full-screen charcell rewrite is
+// idempotent and safe, exactly as the picker's own text mode already does.
+void showHelpScreen(bool graphical_mode, const char *index_file, bool cfg_save_failed)
+{
+    using Btn = io::GamePadState::Button;
+
+    drawHelpScreen(graphical_mode, index_file, cfg_save_failed);
+
+    // ~0u so the START press that opened this screen isn't immediately read
+    // as the press that closes it.
+    uint32_t prev = ~0u;
+    for (;;) {
+        uint32_t btns   = readPads();
+        uint32_t pushed = btns & ~prev;
+        prev = btns;
+
+        DrawScreen(-1);
+
+        if (pushed & (Btn::START | Btn::A | Btn::B | Btn::SELECT)) break;
     }
 }
 
@@ -1021,9 +1245,10 @@ int main()
                          "Fix /boot.txt and reset.",
                          nullptr);
     }
-    LOG("boot_ini: BASEDIR=%s INDEX=%s SCREENSAVER=%s",
+    LOG("boot_ini: BASEDIR=%s INDEX=%s SCREENSAVER=%s GUI=%d THEME=%u",
         ini.base_dir, ini.index_file,
-        ini.screensaver == SS_MODE_STARFIELD ? "STARFIELD" : "BLOCKS");
+        ini.screensaver == SS_MODE_STARFIELD ? "STARFIELD" : "BLOCKS",
+        (int)ini.gui_graphical, (unsigned)ini.theme);
 
     snprintf(g_emuDir,       sizeof(g_emuDir),       "%s/%d",      ini.base_dir, HW_CONFIG);
     snprintf(g_index_path,   sizeof(g_index_path),   "%s/%s",      ini.base_dir, ini.index_file);
@@ -1031,6 +1256,53 @@ int main()
     gui_set_asset_dir(ini.base_dir);
     screensaver_set_asset_dir(ini.base_dir);
     screensaver_set_mode(ini.screensaver);
+    themes_init(ini.base_dir);
+
+    // Legacy .guimode -> /boot.txt GUI=. Only when boot.txt doesn't already
+    // carry the key, so an explicit GUI= always wins. Runs once ever: the file
+    // is deleted as soon as the value is safely in boot.txt.
+    {
+        FILINFO gi;
+        if (!ini.seen_gui && f_stat(g_guimode_path, &gi) == FR_OK) {
+            ini.gui_graphical = gui_load_mode(g_guimode_path);
+            LOG("Migrating %s -> /boot.txt GUI=%d", g_guimode_path, (int)ini.gui_graphical);
+            if (sd_boot_ini_save("/boot.txt", &ini)) f_unlink(g_guimode_path);
+            else LOG("boot.txt write failed; keeping %s for now", g_guimode_path);
+        }
+    }
+
+    // Cards written before themes existed keep their artwork loose in
+    // <BASEDIR>/assets. Move it into themes/0 so there is always a theme 0.
+    if (themes_migration_needed()) {
+        showMessage("Updating SD card layout...", "assets -> assets/themes/0", nullptr);
+        DrawScreen(-1);
+        themes_migrate_default();
+    }
+    themes_scan();
+    {
+        int theme = ini.theme;
+        if (!themes_exists(theme)) {
+            // Configured theme was deleted from the card (or never existed).
+            int fallback = themes_exists(0) ? 0 : themes_lowest();
+            theme = (fallback >= 0) ? fallback : 0;
+            LOG("Theme %u not on card; using %d", (unsigned)ini.theme, theme);
+            ini.theme = (uint8_t)theme;
+        }
+        themes_set_active(theme);
+
+        char td[80];
+        themes_dir_of(theme, td, sizeof(td));
+        gui_set_theme_dir(td);
+        if (themes_exists(0)) {
+            themes_dir_of(0, td, sizeof(td));
+            gui_set_theme_fallback_dir(td);
+        } else {
+            // No theme 0 to fall back to -- misses go straight to black.
+            gui_set_theme_fallback_dir(nullptr);
+        }
+        LOG("themes: mask=0x%03X count=%d active=%d",
+            (unsigned)themes_mask(), themes_count(), theme);
+    }
 
     // Pre-load the emulators.txt (or user-renamed) index. It's the allow-list
     // that scanEmulators() filters SD .uf2 files against, so a missing or
@@ -1080,16 +1352,17 @@ int main()
     // allocated below. PSRAM boards keep the existing behaviour -- picker
     // tiles convert lazily on first view and the screensaver batches at
     // first activation -- since their scratch lives in lwmem, not here.
+    //
+    // Every present theme is converted, not just the active one: switching
+    // theme at runtime must not need the converter, which by then has no heap
+    // left to run in.
     if (!Frens::isPsramEnabled()) {
-        char asset_sub[96];
-        snprintf(asset_sub, sizeof(asset_sub), "%s/assets", ini.base_dir);
-        image_convert_batch_dir(asset_sub, SCREENWIDTH, SCREENHEIGHT,
-                                /*letterbox=*/true, "Converting menu images");
+        themes_convert_all();
         screensaver_convert_batch();
     }
 
     // --- PICKER LOOP --------------------------------------------------------
-    LOG("Entering picker loop. D-pad: navigate, A: start, SELECT: toggle graphical.");
+    LOG("Entering picker loop. D-pad: navigate, A: start, SELECT: toggle graphical, START: help.");
     const int visible = ENDROW - STARTROW + 1;
     int sel = (g_flash_idx >= 0) ? g_flash_idx : 0;
     int top = 0;
@@ -1112,6 +1385,20 @@ int main()
     uint32_t idle_frames    = 0;
     bool     ss_active      = false;
     bool     ss_unavailable = false;
+
+    // Persist GUI= / THEME= to /boot.txt. Failure is deliberately non-fatal:
+    // a write-protected or full card must not stop the picker from working,
+    // so the change still takes effect for this session and the help screen
+    // reports that it wasn't saved.
+    bool cfg_save_failed = false;
+    auto persist_cfg = [&]() {
+        if (sd_boot_ini_save("/boot.txt", &ini)) {
+            cfg_save_failed = false;
+        } else {
+            LOG("boot.txt write FAILED; setting kept in RAM only");
+            cfg_save_failed = true;
+        }
+    };
 
     // Single loader that picks the full-res or half-res variant based on the
     // target buffer's size. Used for both cur (always full) and next (half
@@ -1139,84 +1426,13 @@ int main()
         slide_dir = 0;
     };
 
-    // Restore the last mode the user left us in (file lives on the SD card).
-    graphical_mode = gui_load_mode(g_guimode_path);
+    // Restore the last mode the user left us in (/boot.txt GUI= key).
+    graphical_mode = ini.gui_graphical;
     LOG("Initial menu mode: %s", graphical_mode ? "graphical" : "text");
     if (graphical_mode) enter_graphical();
 
     for (;;) {
-        Frens::PaceFrames60fps(false, true);
-#if NES_PIN_CLK != -1
-        nespad_read_start();
-#endif
-        auto count =
-#if !HSTX
-        dvi_->getFrameCounter();
-#else
-        hstx_getframecounter();
-#endif
-        auto onOff = hw_divider_s32_quotient_inlined(count, 60) & 1;
-        Frens::blinkLed(onOff);
-#if NES_PIN_CLK != -1
-        nespad_read_finish();   // populates nespad_states[]
-#endif
-        tuh_task();
-#if WIIPAD_DELAYED_START and WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
-        // Probe once per second (onOff toggles at 60 frames) so we pick up a
-        // pad that was plugged in after boot. wiipad_begin() is a no-op once
-        // connected.
-        if (!wiipad_is_connected() && onOff) {
-            wiipad_begin();
-        }
-#endif
-        uint32_t btns = io::getCurrentGamePadState(0).buttons |
-                        io::getCurrentGamePadState(1).buttons;
-        // nespad_states[] and wiipad_read() use their own bit layouts (NES
-        // bus order / Wii nunchuk layout). Translate them into the same
-        // io::GamePadState::Button bits the rest of this loop checks via Btn::*.
-#if NES_PIN_CLK != -1 || NES_PIN_CLK_1 != -1
-        auto nesToBtn = [](uint8_t s) -> uint32_t {
-            // nespad_states is LSB-first wire order (A clocked out first lands
-            // in bit 0): 0x01=A, 0x02=B, 0x04=Select, 0x08=Start, 0x10=Up,
-            // 0x20=Down, 0x40=Left, 0x80=Right. The header comment in
-            // pico_shared/nespad.cpp claims the reverse and is wrong --
-            // infonesPlus ORs nespad_states[] straight into a bitmask with
-            // A=1<<0..RIGHT=1<<7, which only works under this layout.
-            uint32_t b = 0;
-            if (s & 0x01) b |= Btn::A;
-            if (s & 0x02) b |= Btn::B;
-            if (s & 0x04) b |= Btn::SELECT;
-            if (s & 0x08) b |= Btn::START;
-            if (s & 0x10) b |= Btn::UP;
-            if (s & 0x20) b |= Btn::DOWN;
-            if (s & 0x40) b |= Btn::LEFT;
-            if (s & 0x80) b |= Btn::RIGHT;
-            return b;
-        };
-#endif
-#if NES_PIN_CLK != -1
-        btns |= nesToBtn(nespad_states[0]);
-#endif
-#if NES_PIN_CLK_1 != -1
-        btns |= nesToBtn(nespad_states[1]);
-#endif
-#if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
-        {
-            // wiipad_read() layout (see wiipad.cpp): A=1<<0, B=1<<1, SELECT=1<<2,
-            // START=1<<3, UP=1<<4, DOWN=1<<5, LEFT=1<<6, RIGHT=1<<7, X=1<<8, Y=1<<9.
-            uint16_t w = wiipad_read();
-            if (w & (1 << 0)) btns |= Btn::A;
-            if (w & (1 << 1)) btns |= Btn::B;
-            if (w & (1 << 2)) btns |= Btn::SELECT;
-            if (w & (1 << 3)) btns |= Btn::START;
-            if (w & (1 << 4)) btns |= Btn::UP;
-            if (w & (1 << 5)) btns |= Btn::DOWN;
-            if (w & (1 << 6)) btns |= Btn::LEFT;
-            if (w & (1 << 7)) btns |= Btn::RIGHT;
-            if (w & (1 << 8)) btns |= Btn::X;
-            if (w & (1 << 9)) btns |= Btn::Y;
-        }
-#endif
+        uint32_t btns   = readPads();
         uint32_t pushed = btns & ~prevButtons;
         prevButtons = btns;
 
@@ -1248,11 +1464,21 @@ int main()
             else                    ss_unavailable = true;
         }
 
+        // START: help screen. Checked before SELECT so opening help can never
+        // also toggle the menu mode on the same frame.
+        if (pushed & Btn::START) {
+            showHelpScreen(graphical_mode, ini.index_file, cfg_save_failed);
+            prevButtons = ~0u;   // swallow the press that dismissed it
+            idle_frames = 0;
+            continue;            // repaint from scratch next frame
+        }
+
         // SELECT: toggle modes regardless. Persist so next boot lands the same way.
         if (pushed & Btn::SELECT) {
             graphical_mode = !graphical_mode;
             LOG("SELECT -> mode=%s", graphical_mode ? "graphical" : "text");
-            gui_save_mode(g_guimode_path, graphical_mode);
+            ini.gui_graphical = graphical_mode;
+            persist_cfg();
             if (graphical_mode) enter_graphical();
         }
 
@@ -1278,6 +1504,28 @@ int main()
                     } else {
                         // No slide buffer at all: just reload cur with the new image.
                         load_image_into(sel, gui_buf_cur(), false);
+                    }
+                }
+
+                // UP/DOWN cycles the artwork theme (they do nothing else in
+                // graphical mode). Only themes actually present on the card
+                // are reachable. No slide: this repaints the SAME entry, so a
+                // transition would be staging the neighbour buffer for nothing.
+                bool tdn = (pushed & Btn::DOWN) != 0;
+                bool tup = (pushed & Btn::UP)   != 0;
+                if ((tdn || tup) && themes_count() > 1) {
+                    int t = themes_next(themes_active(), tdn ? +1 : -1);
+                    if (t != themes_active()) {
+                        themes_set_active(t);
+                        char td[80];
+                        themes_dir_of(t, td, sizeof(td));
+                        gui_set_theme_dir(td);
+                        LOG("%s -> theme=%d", tdn ? "DOWN" : "UP", t);
+                        ini.theme = (uint8_t)t;
+                        persist_cfg();
+                        load_image_into(sel, gui_buf_cur(), false);
+                        slide_p   = 0;
+                        slide_dir = 0;
                     }
                 }
             } else {
@@ -1344,7 +1592,7 @@ int main()
             getButtonLabels(bl1, bl2);
             char footer[SCREEN_COLS + 1];
             snprintf(footer, sizeof(footer),
-                     "LEFT/RIGHT:choose  %s:start  SELECT:text", bl1);
+                     "L/R:app  U/D:theme  %s:go  START:help", bl1);
             gui_set_footer(footer);
             gui_draw_frame(gui_buf_cur(),
                            slide_dir != 0 ? gui_buf_next() : nullptr,

@@ -6,7 +6,7 @@
 #   <output_dir>/emu/<HW_CONFIG>/<prog_name>.uf2
 #   <output_dir>/emu/emulators.txt
 #   <output_dir>/emu/boot.example.txt
-#   <output_dir>/emu/assets/<image_key>.{444,555}
+#   <output_dir>/emu/assets/themes/<0-9>/<image_key>.{444,555}
 #   <output_dir>/emu/assets/screensaver/<sprite>.{444,555}   (if present)
 #
 # Usage: pack_release.sh <output_dir> <emu_build_dir> <loader_dir>
@@ -80,18 +80,25 @@ mkdir -p "$OUTDIR/emu" "$OUTDIR/emu/assets"
 cp "$LOADER/emu/emulators.txt" "$OUTDIR/emu/emulators.txt"
 cp "$LOADER/boot.txt" "$OUTDIR/emu/boot.example.txt"
 shopt -s nullglob
+
+# Menu artwork, one folder per theme: <BASEDIR>/assets/themes/<0-9>/<key>.444|.555
 asset_count=0
-for ext in 444 555; do
-    for src in "$LOADER/emu/assets/"*."$ext"; do
-        base="$(basename "$src")"
-        case "$base" in
-            *" copy."*) continue ;;
-        esac
-        cp "$src" "$OUTDIR/emu/assets/$base"
-        asset_count=$((asset_count + 1))
+for theme in "$LOADER/emu/assets/themes/"[0-9]; do
+    [ -d "$theme" ] || continue
+    tnum="$(basename "$theme")"
+    mkdir -p "$OUTDIR/emu/assets/themes/$tnum"
+    for ext in 444 555; do
+        for src in "$theme/"*."$ext"; do
+            base="$(basename "$src")"
+            case "$base" in
+                *" copy."*) continue ;;
+            esac
+            cp "$src" "$OUTDIR/emu/assets/themes/$tnum/$base"
+            asset_count=$((asset_count + 1))
+        done
     done
 done
-echo "Copied $asset_count asset file(s) to $OUTDIR/emu/assets/"
+echo "Copied $asset_count asset file(s) to $OUTDIR/emu/assets/themes/"
 
 # Screensaver sprites (optional): <BASEDIR>/assets/screensaver/<name>.444|.555
 if [ -d "$LOADER/emu/assets/screensaver" ]; then

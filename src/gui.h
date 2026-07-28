@@ -1,10 +1,10 @@
 /*
  * gui.h - Graphical menu support for pico-bootLoader.
  *
- * Loads 320x240 raw 16-bit artwork from <BASEDIR>/assets/<key>.{444|555}
+ * Loads 320x240 raw 16-bit artwork from <BASEDIR>/assets/themes/<N>/<key>.{444|555}
  * (BASEDIR defaults to /emu; overridable at runtime via gui_set_asset_dir()
- * fed from /boot.txt). Extension
- * picked by the shared FILEXTFORSEARCH macro), holds two reusable image
+ * fed from /boot.txt, and the active theme directory via gui_set_theme_dir()).
+ * Extension picked by the shared FILEXTFORSEARCH macro), holds two reusable image
  * buffers in PSRAM (current + incoming), composes a horizontal slide between
  * them per scanline, and writes the result straight into whichever framebuffer
  * the active display backend (PicoDVI line-stream / PicoDVI framebuffer / HSTX
@@ -17,8 +17,10 @@
  * inside gui_draw_frame() so it renders uniformly across all backends
  * (including PicoDVI line-stream, which has no persistent framebuffer).
  *
- * Mode persistence: a one-byte file ('0' / '1') on the SD card remembers
- * whether the user last left the menu in text or graphical mode.
+ * Mode persistence now lives in /boot.txt's GUI key. gui_load_mode() survives
+ * only to read the legacy one-byte <BASEDIR>/.guimode file once, so cards
+ * written for earlier releases keep the mode the user left them in; main.cpp
+ * writes the value into /boot.txt and deletes the file.
  */
 #ifndef GUI_H
 #define GUI_H
@@ -31,16 +33,26 @@
 extern "C" {
 #endif
 
-/* Mode persistence ('0' text / '1' graphical). gui_load_mode() returns true
- * (graphical) when the file is missing -- first-boot default. */
+/* Read the legacy one-byte mode file ('0' text / '1' graphical). Returns true
+ * (graphical) when the file is missing -- the historical first-boot default.
+ * Only used to migrate pre-theme cards into /boot.txt's GUI key. */
 bool gui_load_mode(const char *path);
-void gui_save_mode(const char *path, bool graphical);
 
-/* Override the base directory under which artwork lives. gui_load_image*
- * then reads from "<dir>/assets/<key><ext>". Default is "/emu" -- callers
+/* Override the base directory under which artwork lives. Also reseeds both
+ * theme directories to "<dir>/assets/themes/0" so gui stays usable if the
+ * theme setters below are never called. Default base is "/emu" -- callers
  * that support /boot.txt call this once at startup after parsing it.
  * NULL / empty input is a silent no-op. */
 void gui_set_asset_dir(const char *dir);
+
+/* Absolute directory of the ACTIVE theme, e.g. "/emu/assets/themes/3".
+ * Copied internally, so the caller's buffer need not outlive the call. */
+void gui_set_theme_dir(const char *dir);
+
+/* Absolute directory of theme 0, used when the active theme has no artwork
+ * for a key. Pass NULL / "" when theme 0 does not exist on the card -- misses
+ * then go straight to the caller's placeholder instead. */
+void gui_set_theme_fallback_dir(const char *dir);
 
 /* Allocate the image buffers. The cur buffer is always full resolution
  * (320x240, ~150 KB). The next buffer is full resolution when PSRAM is
@@ -63,8 +75,9 @@ uint16_t *gui_buf_cur(void);
 uint16_t *gui_buf_next(void);
 void      gui_swap_buffers(void);
 
-/* Load <asset_dir>/assets/<image_key>.<FILEXTFORSEARCH> into the 320x240
- * buffer. Returns false if the file is missing, the header is wrong, or the
+/* Load <theme_dir>/<image_key>.<FILEXTFORSEARCH> into the 320x240 buffer,
+ * falling back to the theme-0 directory when the active theme has no artwork
+ * for this key. Returns false if neither has it, the header is wrong, or the
  * read comes up short. */
 bool gui_load_image(const char *image_key, uint16_t *dest_320x240);
 
