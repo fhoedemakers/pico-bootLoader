@@ -37,6 +37,18 @@ A resident .uf2 bootloader / front-end for the RP2350 retro-emulator family (pic
 - Boards without PSRAM now convert artwork for *every* theme at boot rather than
   one folder, since the converter cannot run once the menu is up. The first boot
   after adding a theme is correspondingly slower.
+- **`pico-bootLoader_sdcard.zip` is a release asset again.** The archive carries
+  the emulators, the *Doom* port and its WAD, the artwork themes, the screensaver
+  sprites, a sample `boot.txt` and a new `versions.txt` recording which release
+  tag each emulator was built from. Unpack it at the root of the card.
+- **Release tags now say what changed.** `v0.N` is a bootloader firmware release
+  (re-flash the board and refresh the card); `v0.N.M` ships the same firmware with
+  refreshed emulator binaries, so only `/emu` on the card needs replacing. Each
+  release lists the emulator versions its archive contains.
+- **Doom's WAD is named `doom1-whx.uf2`** in `emulators.txt`, matching what the
+  build actually produces. Earlier cards declared `doom1-whx-for-fruitjam.uf2`,
+  which the loader could never find, so it launched *Doom* without flashing the
+  WAD.
 
 ## General Info
 

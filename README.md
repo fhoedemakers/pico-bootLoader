@@ -139,6 +139,16 @@ to emulator selection* to reboot back into this menu.
 The Releases page provides two kinds of download: the per-board bootloader
 `.uf2` binaries and the `pico-bootLoader_sdcard.zip` SD-card archive.
 
+Release tags say which of the two changed:
+
+| Tag | What changed | What you need to do |
+| --- | --- | --- |
+| `v0.N` | bootloader firmware | re-flash the board **and** refresh the SD card |
+| `v0.N.M` | emulator binaries only | replace `/emu` on the SD card; no re-flash needed |
+
+Every release lists the exact emulator versions its archive ships, and the same
+table is in `/emu/versions.txt` on the card.
+
 ## Supported hardware
 
 Only RP2350 boards are supported; the partition scheme and the UF2 family checks
@@ -173,6 +183,7 @@ serves both kinds — artwork is cached in both pixel formats (see
 /emu/                                      BASEDIR (default /emu, override in boot.txt)
 /emu/<HW_CONFIG>/*.uf2                     applications for this board (e.g. /emu/8/)
 /emu/emulators.txt                         the index / allow-list (name set by INDEX)
+/emu/versions.txt                          which version each application was built from (informational)
 /emu/assets/themes/0/<image_key>.png|.jpg  default artwork theme, converted on first use
 /emu/assets/themes/1..9/                   optional extra themes (UP/DOWN to switch)
 /emu/assets/screensaver/*.png|.jpg         screensaver images (optional, not themed)
@@ -234,7 +245,7 @@ application:
 # program_name  ; image_key ; display_name              ; optional aux data uf2
 piconesPlus     ; nes       ; Nintendo Entertainment System
 picogenesisPlus ; md        ; Sega Genesis/Mega Drive
-doom_tiny       ; doom      ; Doom!                     ; doom1-whx-for-fruitjam.uf2
+doom_tiny       ; doom      ; Doom!                     ; doom1-whx.uf2
 ```
 
 - Fields are separated by `;`, whitespace is trimmed, and `#` starts a comment
@@ -401,7 +412,7 @@ second `.uf2` with family `RP2350 DATA` (`0xe48bff58`) can target free flash
 above the application. Name it in the index row's fourth field and the loader
 flashes it alongside the application, skipping the write when the CRC already
 matches. *Doom* is distributed this way: the engine (`doom_tiny.uf2`, ARM_S)
-plus the WAD (`doom1-whx-for-fruitjam.uf2`, DATA).
+plus the WAD (`doom1-whx.uf2`, DATA).
 
 ### Detecting the bootloader and returning to the menu
 
@@ -453,6 +464,54 @@ does not, and every link prints its occupancy. Most configurations sit near
 To build the emulators and the *Doom* port themselves,
 [`build_emulators.sh`](build_emulators.sh) clones each source repository and
 produces the bootloader-format `.uf2` files, placing them under `emu/<HW_CONFIG>/`.
+
+By default each repository is built from its **latest release tag**, with the tag
+stamped into that repository's own `pico_shared/menu.h` `SWVERSION` so the
+emulator reports its version instead of a build date. `-B` asks interactively for
+a branch instead, and `-m` builds each repository's default branch; neither
+stamps a version.
+
+> **`pico_shared` is not left at the revision the tag pins.** `bld.sh` only
+> learned `-b` (`BUILD_FOR_BOOTLOADER`) in `pico_shared` `f2c8be9`, and the
+> emulator release tags predate it — their pinned `pico_shared` rejects `-b`
+> outright, so no bootloader-format `.uf2` can be produced from it. Tag mode
+> therefore builds each emulator's tagged source against `pico_shared` `main`.
+> Every other submodule stays at the revision the tag pins, and
+> `emu/versions.txt` records both refs. Once the emulator repositories pin a
+> `-b`-capable `pico_shared` and are re-tagged, this substitution becomes a
+> no-op.
+
+```bash
+./build_emulators.sh -c 8            # one board, latest tags
+./build_emulators.sh -c all -j 3     # every board
+./build_emulators.sh -c all -j 3 -z  # ... and pack the SD-card archive
+./build_emulators.sh -c 8 -B         # pick a branch interactively
+```
+
+`-z` writes [`emu/versions.txt`](emu/versions.txt) — the manifest of what each
+emulator was built from, one `<program_name>;<repo>;<ref>;<pico_shared>` row per
+shipped emulator — and packs
+`releases/pico-bootLoader_sdcard.zip` via
+[`.github/scripts/pack_sdcard.sh`](.github/scripts/pack_sdcard.sh). The packer
+takes the `emu/` tree as its only source of truth and refuses to build an archive
+containing an empty `.uf2`, so a half-finished build cannot ship. It requires
+`-c all`, since an archive built from one board would be missing the others.
+
+### Cutting a release
+
+The loader `.uf2`s are built by CI; the SD-card archive is built locally, because
+it needs all nine emulator toolchains. An emulator-only refresh still gets its own
+release so users find out about it — that is what the `v0.N.M` form is for.
+
+The full maintainer checklist — per-scenario steps, dry runs, verification and
+rollback — is in [`RELEASING.md`](RELEASING.md). The short version:
+
+```bash
+./build_emulators.sh -c all -j 3 -z            # emulators + archive (local)
+git add emu/versions.txt && git commit -m "Refresh emulator bundle" && git push
+gh workflow run BuildAndRelease.yml -f tag=v0.2.1   # builds loader, creates tag, publishes
+gh release upload v0.2.1 releases/pico-bootLoader_sdcard.zip
+```
 
 ## Credits
 

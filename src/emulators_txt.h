@@ -9,7 +9,7 @@
  *   picogenesisPlus;md;Sega Genesis/Mega Drive
  *
  * Example (four columns - emulator with a companion data blob):
- *   doom_tiny;doom;Doom!;doom1-whx-for-fruitjam.uf2
+ *   doom_tiny;doom;Doom!;doom1-whx.uf2
  *
  * - program_name matches the value extracted from each UF2's binary_info
  *   (see program_name.h). Comparison is case-insensitive.

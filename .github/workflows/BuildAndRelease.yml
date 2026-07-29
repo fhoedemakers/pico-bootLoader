@@ -1,8 +1,21 @@
-name: Build and create a release when tag is pushed
+name: Build and create a release
 
-# Only deploy when a new tag is pushed
-# git tag v0.n
-# git push origin v0.n
+# Two ways in:
+#
+#  1. Push a tag, as before:
+#         git tag v0.n && git push origin v0.n
+#
+#  2. Run this workflow manually with a "tag" input:
+#         gh workflow run BuildAndRelease.yml -f tag=v0.2.1
+#     The release step then creates that tag itself (tag_name +
+#     target_commitish), so a release can be cut without a tag push. This is how
+#     an emulator-only refresh is published: the loader firmware is unchanged, but
+#     the SD-card archive is new, so users still need a release to notice.
+#     Dispatching with an empty tag builds everything and releases nothing.
+#
+# Tag convention:
+#     v0.N     bootloader firmware release  — re-flash the board and refresh the card
+#     v0.N.M   same firmware, refreshed emulator binaries — refresh the card only
 on:
     push:
         tags:
@@ -10,6 +23,11 @@ on:
           - "v*.*.*"
           - "v*.*"
     workflow_dispatch:
+        inputs:
+            tag:
+                description: 'Tag to create and release (e.g. v0.2.1). Leave empty to build without releasing.'
+                required: false
+                type: string
 
 # Must match the project() name in CMakeLists.txt
 env:
@@ -22,7 +40,7 @@ permissions:
 jobs:
     build-release:
         runs-on: self-hosted
-        name: Build loader + emulators and create release
+        name: Build loader and create release
         steps:
 
           - name: Check out this repository with submodules
@@ -30,19 +48,27 @@ jobs:
             with:
                 submodules: recursive
 
-          - name: Update line containing pico_set_program_version() in CMakeLists.txt with tag name
+          - name: Resolve the tag to build and release
+            id: ver
             run: |
-                 input_string=${{ github.ref }}
-                 prefix="refs/tags/"
-                 if [[ $input_string == $prefix* ]]; then
-                      echo "The string starts with 'refs/tags/'."
-                      tag="${input_string#$prefix}"
-                      echo "Tag is ${tag}"
-                      sed -i "s/^[[:space:]]*pico_set_program_version(.*/pico_set_program_version(${{ env.APP_NAME }} \"$tag\")/" CMakeLists.txt
-                      sed -i "s/VX.X/$tag/" pico_shared/menu.h
+                 if [ "${{ github.event_name }}" = "push" ]; then
+                      tag="${GITHUB_REF#refs/tags/}"
                  else
-                      echo "The string does not start with 'refs/tags/'."
+                      tag="${{ inputs.tag }}"
                  fi
+                 echo "Tag is '${tag}'"
+                 if [ -z "$tag" ]; then
+                      echo "No tag: building only, no release will be created."
+                 fi
+                 echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          - name: Stamp the tag into CMakeLists.txt and pico_shared/menu.h
+            if: steps.ver.outputs.tag != ''
+            env:
+                TAG: ${{ steps.ver.outputs.tag }}
+            run: |
+                 sed -i "s/^[[:space:]]*pico_set_program_version(.*/pico_set_program_version(${{ env.APP_NAME }} \"$TAG\")/" CMakeLists.txt
+                 sed -i -E "s|^#define[[:space:]]+SWVERSION[[:space:]]+\".*\"|#define SWVERSION \"$TAG\"|" pico_shared/menu.h
                  grep "pico_set_program_version" CMakeLists.txt
                  grep SWVERSION pico_shared/menu.h
 
@@ -53,86 +79,64 @@ jobs:
                  export PICO_PIO_USB_PATH=/datalocal/Pico-PIO-USB
                  ./buildAll.sh
 
-        #   - name: Clone and build the emulators (latest tag)
-        #     run: |
-        #          export PICO_SDK_PATH=/datalocal/pico/pico-sdk
-        #          export PICO_PIO_USB_PATH=/datalocal/Pico-PIO-USB
-        #          rm -rf emu-build
-        #          mkdir emu-build
-        #          # prog_name from emulators.txt -> github repo name
-        #          EMULATORS=(
-        #              "piconesPlus=pico-infonesPlus"
-        #              "picogenesisPlus=pico-genesisPlus"
-        #              "picopcePlus=pico-pcePlus"
-        #              "PicoPeanutGB=pico-peanutGB"
-        #              "picosmsPlus=pico-smsplus"
-        #              "picoPacPlus=pico-pacPlus"
-        #          )
-        #          for entry in "${EMULATORS[@]}"; do
-        #              repo="${entry##*=}"
-        #              url="https://github.com/fhoedemakers/$repo.git"
-        #              # Determine the latest version tag from the remote
-        #              tag=$(git ls-remote --tags --refs --sort=-v:refname "$url" \
-        #                  | head -n1 | sed 's#.*refs/tags/##')
-        #              if [ -z "$tag" ]; then
-        #                  echo "No tags found for $repo" >&2
-        #                  exit 1
-        #              fi
-        #              echo "=============================="
-        #              echo "Building $repo (tag $tag)"
-        #              echo "=============================="
-        #              git clone --branch "$tag" --recurse-submodules --depth 1 \
-        #                  "$url" "emu-build/$repo"
-        #              (
-        #                  cd "emu-build/$repo"
-        #                  chmod +x build*.sh bld.sh pico_shared/bld.sh
-        #                  ./buildAll.sh
-        #              )
-        #          done
-        #          # fruitjam-doom (Doom!) — Adafruit Fruit Jam only (HW_CONFIG 8).
-        #          # No release tags, so build the branch. It vendors its own
-        #          # pico-sdk/pico-extras as submodules (hence --recurse-submodules)
-        #          # and uses a bespoke script that also emits the DATA-family WAD
-        #          # UF2. pack_release.sh picks the outputs up from
-        #          # emu-build/fruitjam-doom/build_bl_fruitjam/src/.
-        #          DOOM_REPO=fruitjam-doom
-        #          DOOM_BRANCH=adafruit-fruitjam
-        #          echo "=============================="
-        #          echo "Building $DOOM_REPO (branch $DOOM_BRANCH)"
-        #          echo "=============================="
-        #          git clone --branch "$DOOM_BRANCH" --recurse-submodules --depth 1 \
-        #              "https://github.com/fhoedemakers/$DOOM_REPO.git" "emu-build/$DOOM_REPO"
-        #          (
-        #              cd "emu-build/$DOOM_REPO"
-        #              chmod +x fruitjam-build-forbootloader.sh
-        #              ./fruitjam-build-forbootloader.sh
-        #          )
-
-        #   - name: Assemble SD-card release zip
-        #     run: |
-        #          chmod +x .github/scripts/pack_release.sh
-        #          rm -rf release-zip
-        #          mkdir release-zip
-        #          ./.github/scripts/pack_release.sh release-zip emu-build .
-        #          (cd release-zip && zip -r ../releases/pico-bootLoader_sdcard.zip emu)
-
           - name: List release artifacts
             run: |
                  ls -l releases/
 
-          # - name: Create release
-          #   uses: softprops/action-gh-release@v3
-          #   if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
-          #   with:
-          #     files: |
-          #       releases/pico-bootLoader_*.uf2
-          #       releases/pico-bootLoader_sdcard.zip
-          #     body_path: CHANGELOG.md
+          # Release notes = a header describing what kind of release this is, the
+          # emulator versions the SD-card archive ships (emu/versions.txt, written
+          # by build_emulators.sh -z and committed), then CHANGELOG.md.
+          #
+          # The SD-card archive itself is built locally, not here — see the release
+          # procedure in README.md — and attached with `gh release upload`.
+          - name: Generate release notes
+            if: steps.ver.outputs.tag != ''
+            env:
+                TAG: ${{ steps.ver.outputs.tag }}
+            run: |
+                 : > release-notes.md
+                 # A three-component tag (v0.N.M) means the loader firmware did not
+                 # change; only the emulator binaries on the card did.
+                 if [ "$(printf '%s' "$TAG" | tr -cd '.' | wc -c)" -ge 2 ]; then
+                      baseline="${TAG%.*}"
+                      {
+                        echo "> **SD-card content update.** The bootloader firmware is unchanged since"
+                        echo "> [\`$baseline\`](${{ github.server_url }}/${{ github.repository }}/releases/tag/$baseline) — you do **not** need to re-flash"
+                        echo "> the board. Only the emulator binaries in \`pico-bootLoader_sdcard.zip\`"
+                        echo "> changed; replace the \`/emu\` folder on the SD card."
+                        echo
+                      } >> release-notes.md
+                 fi
+                 if [ -f emu/versions.txt ]; then
+                      {
+                        echo "### Emulator versions in \`pico-bootLoader_sdcard.zip\`"
+                        echo
+                        echo "| Emulator | Repository | Version | pico_shared |"
+                        echo "|---|---|---|---|"
+                      } >> release-notes.md
+                      while IFS=';' read -r prog repo ref shared || [ -n "$prog" ]; do
+                          case "$prog" in ''|\#*) continue ;; esac
+                          echo "| \`$prog\` | [$repo](https://github.com/${{ github.repository_owner }}/$repo) | $ref | ${shared:-–} |" >> release-notes.md
+                      done < emu/versions.txt
+                      echo >> release-notes.md
+                 else
+                      echo "NOTE: emu/versions.txt is absent; release notes carry no emulator version table." >&2
+                 fi
+                 cat CHANGELOG.md >> release-notes.md
+                 echo "----- release-notes.md -----"
+                 cat release-notes.md
 
+          # tag_name + target_commitish let the action CREATE the tag, so a
+          # workflow_dispatch run can publish a release without a tag push. (A tag
+          # pushed by a workflow using the default GITHUB_TOKEN would not trigger
+          # this workflow, so pushing one from CI is not an option.)
           - name: Create release
             uses: softprops/action-gh-release@v3
-            if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
+            if: steps.ver.outputs.tag != ''
             with:
+              tag_name: ${{ steps.ver.outputs.tag }}
+              target_commitish: ${{ github.sha }}
+              name: ${{ steps.ver.outputs.tag }}
+              body_path: release-notes.md
               files: |
                 releases/pico-bootLoader_*.uf2
-              body_path: CHANGELOG.md

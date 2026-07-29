@@ -1,53 +1,73 @@
 #!/usr/bin/env bash
-# Interactive helper: clone + build the bootloader-targeted emulators for one
-# hwconfig (or, with -c all, every supported hwconfig) and drop the resulting
-# UF2s into emu/<hwconfig>/<prog_name>.uf2.
+# Clone + build the bootloader-targeted emulators for one hwconfig (or, with
+# -c all, every supported hwconfig) and drop the resulting UF2s into
+# emu/<hwconfig>/<prog_name>.uf2.
 #
-# Mirrors the "Clone and build the emulators" step of
-# .github/workflows/BuildAndRelease.yml, but interactive and scoped to a single
-# hwconfig + a user-chosen branch for emulator repos and pico_shared. With -t it
-# instead builds each repo's latest release tag (submodules pinned in the tag),
-# matching the release workflow. With -m it non-interactively builds each repo's
-# default branch (main or master, resolved per repo from the remote HEAD).
+# By default every emulator repo is built from its LATEST RELEASE TAG, with that
+# tag stamped into pico_shared/menu.h SWVERSION so the emulator reports a version
+# instead of a build date. This is the mode the release bundle is cut from; add
+# -z to also pack the SD-card zip.
+#
+# pico_shared is NOT left at the revision the tag pins. bld.sh only learned -b
+# (BUILD_FOR_BOOTLOADER) in pico_shared f2c8be9, and the emulator release tags
+# predate that: they pin a pico_shared whose bld.sh rejects -b outright, so a
+# bootloader-format UF2 cannot be produced from a tag's own pin. Tag mode
+# therefore builds the emulator's tagged source against pico_shared main, and
+# emu/versions.txt records both refs.
+#
+# -B instead asks interactively for a branch to use for the emulator repos and
+# for pico_shared; -m non-interactively builds each repo's default branch (main
+# or master, resolved per repo from the remote HEAD). Neither stamps a version.
 set -euo pipefail
 
 JOBS=2
-TAG_MODE=0
+TAG_MODE=1
+BRANCH_MODE=0
 MAIN_MODE=0
+PACK_ZIP=0
 HWCONFIG_ARG=""
 usage() {
     cat <<EOF
-Usage: $0 [-c N|all] [-j N] [-t] [-m] [-h]
+Usage: $0 [-c N|all] [-j N] [-B|-m] [-z] [-h]
   -c N   build for HW_CONFIG N non-interactively (skip the picker).
   -c all build for every supported HW_CONFIG, unattended. PIO-USB configs are
          skipped automatically when PICO_PIO_USB_PATH is unset/unusable.
-         Combine with -t or -m for a fully hands-off build of all configs.
   -j N   build up to N emulators in parallel (default: $JOBS). Each build
          is capped to nproc/N processors so total load stays near nproc.
          With -j 1, output streams live; with -j >1, per-emulator logs are
          written to a temp dir.
-  -t     build each emulator repo's latest release tag (like the release
-         workflow / pack_release path) instead of asking for branches.
-         Submodules — including pico_shared — are left at the revisions
-         pinned in that tag.
+  -B     ask interactively for the branch to build for the emulator repos and
+         for pico_shared, instead of using each repo's latest release tag.
   -m     non-interactively build each repo's default branch (main or master,
          whichever its remote HEAD points at), skipping the branch picker.
-         Mutually exclusive with -t.
+  -z     after building, write emu/versions.txt and pack the SD-card archive
+         releases/pico-bootLoader_sdcard.zip. Requires -c all (a zip built from
+         one hwconfig would be missing every other board) and the default tag
+         mode (a release bundle must be built from tags).
   -h     this help
+
+Default (no -B/-m): each emulator repo's latest release tag, built against
+pico_shared main (the tags pin a pico_shared whose bld.sh predates -b).
 EOF
 }
-while getopts "c:j:tmh" opt; do
+while getopts "c:j:Btmzh" opt; do
     case "$opt" in
         c) HWCONFIG_ARG="$OPTARG" ;;
         j) JOBS="$OPTARG" ;;
-        t) TAG_MODE=1 ;;
-        m) MAIN_MODE=1 ;;
+        B) BRANCH_MODE=1; TAG_MODE=0 ;;
+        m) MAIN_MODE=1; TAG_MODE=0 ;;
+        t) TAG_MODE=1 ;;   # accepted for compatibility: tag mode is now the default
+        z) PACK_ZIP=1 ;;
         h) usage; exit 0 ;;
         *) usage >&2; exit 1 ;;
     esac
 done
 [[ "$JOBS" =~ ^[0-9]+$ ]] && (( JOBS >= 1 )) || { echo "ERROR: -j must be a positive integer" >&2; exit 1; }
-(( TAG_MODE && MAIN_MODE )) && { echo "ERROR: -t and -m are mutually exclusive" >&2; exit 1; }
+(( BRANCH_MODE && MAIN_MODE )) && { echo "ERROR: -B and -m are mutually exclusive" >&2; exit 1; }
+if (( PACK_ZIP )); then
+    (( TAG_MODE )) || { echo "ERROR: -z requires the default tag mode (not -B/-m): a release bundle must be built from release tags" >&2; exit 1; }
+    [ "$HWCONFIG_ARG" = "all" ] || { echo "ERROR: -z requires -c all: a zip built from a single hwconfig would be missing every other board" >&2; exit 1; }
+fi
 
 cd "$(dirname "$0")"
 LOADER_DIR="$(pwd)"
@@ -162,6 +182,36 @@ default_branch_of() {
     local url="$1"
     git ls-remote --symref "$url" HEAD 2>/dev/null \
         | awk '$1 == "ref:" { sub(/^refs\/heads\//, "", $2); print $2; exit }'
+}
+
+# Resolve a remote's newest release tag — the same selection the release
+# workflow makes. Prints the bare tag name, or nothing when the repo has no tags
+# or cannot be reached. Captures first instead of piping into head: under
+# `set -o pipefail` a large tag list would give git SIGPIPE and fail the caller.
+latest_tag_of() {
+    local url="$1" out
+    out=$(git ls-remote --tags --refs --sort=-v:refname "$url" 2>/dev/null) || return 0
+    printf '%s\n' "$out" | sed -n '1s#.*refs/tags/##p'
+}
+
+# Stamp a version into the emulator's OWN pico_shared/menu.h, exactly as each
+# emulator repo's release workflow does, so the built UF2 reports that version
+# instead of falling back to the build date (see pico_shared/menu.cpp
+# getVersionString(), which special-cases the "VX.X" placeholder).
+#
+# Must be called with the cwd inside the emulator's clone. Anchored on the
+# #define rather than on the "VX.X" placeholder text, so it stays idempotent and
+# keeps working if the placeholder is ever renamed. Repos without pico_shared
+# (fruitjam-doom) are a no-op.
+#
+# Deliberately NOT touching pico_set_program_version() in the emulator's
+# CMakeLists.txt: the bootloader reads only the program *name* from binary_info,
+# never a version, and the emulator repos don't spell that call uniformly.
+stamp_swversion() {
+    local ver="$1"
+    [ -f pico_shared/menu.h ] || return 0
+    sed -i -E "s|^#define[[:space:]]+SWVERSION[[:space:]]+\".*\"|#define SWVERSION \"${ver}\"|" pico_shared/menu.h
+    step "stamped $(grep -m1 SWVERSION pico_shared/menu.h)"
 }
 
 human_size() {
@@ -309,10 +359,15 @@ pick_branch() {
 
 # --- Ask: emulator + pico_shared branches (skipped in tag mode) --------------
 if (( TAG_MODE )); then
-    info "Tag mode: each emulator repo builds its latest release tag; submodules"
-    info "          (including pico_shared) stay at the revisions pinned in the tag."
+    info "Tag mode (default): each emulator repo builds its latest release tag,"
+    info "          with the tag stamped into its SWVERSION."
     EMU_BRANCH="(latest tag per repo)"
-    SHARED_BRANCH="(pinned in tag)"
+    # NOT the revision the tag pins: bld.sh gained -b (BUILD_FOR_BOOTLOADER) only
+    # in pico_shared f2c8be9, and the emulator release tags predate it, so their
+    # pinned pico_shared rejects -b and no bootloader UF2 can be built from it.
+    SHARED_BRANCH="main"
+    info "          pico_shared is switched to '$SHARED_BRANCH': the revisions the tags"
+    info "          pin predate bld.sh's -b flag, so they cannot build for the loader."
 elif (( MAIN_MODE )); then
     info "Main mode: building each repo's default branch (main or master),"
     info "          resolved per repo from the remote's HEAD."
@@ -337,6 +392,62 @@ else
     SHARED_BRANCH="$(pick_branch "pico_shared" "https://github.com/${GITHUB_OWNER}/pico_shared.git" "main")"
     info "pico_shared branch: $SHARED_BRANCH"
 fi
+
+# --- Resolve the ref to build for every emulator, ONCE ------------------------
+# prog_name -> the ref actually built: a tag in tag mode, a branch name in
+# -B/-m, or "<branch>@<shortsha>" for the Doom variants (fruitjam-doom carries
+# no tags, so it is always branch-built and its sha is the only version there
+# is). Empty means "no ref could be resolved" — build_one_emulator turns that
+# into a SKIP.
+#
+# Resolving up front rather than inside build_one_emulator matters for more than
+# tidiness: with -c all the same repo would otherwise be probed once per
+# hwconfig, so a tag pushed mid-run could put v0.43 on one board and v0.44 on
+# another *within the same zip*. One resolution per repo also collapses 9x9
+# ls-remote round-trips to 9, and REF_OF is exactly the manifest -z writes.
+#
+# Populated in the parent shell before the hwconfig loop forks its -j>1
+# subshells, so children inherit it; nothing writes back.
+declare -A REF_OF=()
+# The pico_shared revision every emulator is built against, for the manifest.
+# One value for the whole run: every emulator gets the same $SHARED_BRANCH tip.
+SHARED_SHA=""
+resolve_refs() {
+    local prog repo url ref
+    echo
+    info "Resolving refs to build (${#PROG_NAMES[@]} repo(s))"
+    SHARED_SHA=$(git ls-remote --heads \
+        "https://github.com/${GITHUB_OWNER}/pico_shared.git" "$SHARED_BRANCH" 2>/dev/null \
+        | cut -c1-7) || SHARED_SHA=""
+    step "$(printf '%-16s %-20s %s' "pico_shared" "pico_shared" "${SHARED_BRANCH}${SHARED_SHA:+ @ $SHARED_SHA}")"
+    for prog in "${PROG_NAMES[@]}"; do
+        repo="${REPO_OF[$prog]}"
+        url="https://github.com/${GITHUB_OWNER}/${repo}.git"
+        ref=""
+        if [ -n "${DOOM_BRANCH[$prog]+x}" ]; then
+            # Doom: branch-built in every mode (fruitjam-doom carries no tags), so
+            # branch@shortsha is the only version string there is.
+            local branch="${DOOM_BRANCH[$prog]}" sha=""
+            sha=$(git ls-remote --heads "$url" "$branch" 2>/dev/null | cut -c1-7) || sha=""
+            if [ -n "$sha" ]; then
+                ref="${branch}@${sha}"
+            else
+                warn "[$prog] could not resolve $repo branch '$branch'"
+            fi
+        elif (( TAG_MODE )); then
+            ref="$(latest_tag_of "$url")"
+            [ -n "$ref" ] || warn "[$prog] no tags found in $repo"
+        elif (( MAIN_MODE )); then
+            ref="$(default_branch_of "$url" || true)"
+            [ -n "$ref" ] || warn "[$prog] could not resolve default branch for $repo"
+        else
+            ref="$EMU_BRANCH"
+        fi
+        REF_OF[$prog]="$ref"
+        step "$(printf '%-16s %-20s %s' "$prog" "$repo" "${ref:-(unresolved)}")"
+    done
+}
+resolve_refs
 
 # --- Build fruitjam-doom (Doom!) ---------------------------------------------
 # Handles both variants (doom_tiny, doom_tiny_full) — the per-variant branch,
@@ -369,7 +480,7 @@ _build_doom() {
     printf -v build_subdir "${DOOM_BUILD_FMT[$prog]}" "$tag"
 
     hr
-    echo " $prog  ($repo @ branch $branch)  [HW_CONFIG $HWCONFIG / $tag]"
+    echo " $prog  ($repo @ ${REF_OF[$prog]:-branch $branch})  [HW_CONFIG $HWCONFIG / $tag]"
     echo " clone -> $dest"
     hr
 
@@ -383,6 +494,8 @@ _build_doom() {
     rm -f "$out_dir/${prog}.uf2"
     if [ -n "$wad" ]; then
         rm -f "$out_dir/$wad"
+        # Also sweep the old per-board WAD name emulators.txt used to declare, so
+        # a card refreshed from an earlier build doesn't keep an orphan around.
         shopt -s nullglob
         local stale
         for stale in "$out_dir"/doom1-whx-for-*.uf2; do rm -f "$stale"; done
@@ -443,9 +556,12 @@ _build_doom() {
     info "[$prog] locating produced UF2s"
     local src_dir="$dest/$build_subdir/src"
     local app_uf2="$src_dir/${prog}.uf2"
-    if [ ! -f "$app_uf2" ]; then
+    # -s, not -f: this build has been observed to leave a 0-byte doom_tiny.uf2
+    # behind, which a plain -f test happily reported as BUILT and shipped.
+    if [ ! -s "$app_uf2" ]; then
         elapsed=$(( SECONDS - t0 ))
         echo "MISSING|$elapsed" > "$status_file"
+        [ -f "$app_uf2" ] && warn "[$prog] $(basename "$app_uf2") is empty (0 bytes) — not installing"
         return 0
     fi
 
@@ -456,9 +572,9 @@ _build_doom() {
     local aux_uf2=""
     if [ -n "$wad" ]; then
         aux_uf2="$src_dir/$wad"
-        if [ ! -f "$aux_uf2" ]; then
+        if [ ! -s "$aux_uf2" ]; then
             elapsed=$(( SECONDS - t0 ))
-            echo "FAIL:WAD $wad not produced by $build_script|$elapsed" > "$status_file"
+            echo "FAIL:WAD $wad not produced by $build_script (missing or empty)|$elapsed" > "$status_file"
             return 0
         fi
     fi
@@ -513,32 +629,25 @@ build_one_emulator() {
     local dest="$BUILD_DIR/$repo"
     local url="https://github.com/${GITHUB_OWNER}/${repo}.git"
 
-    # Resolve the ref to build: the chosen branch, or (in tag mode) this repo's
-    # latest release tag — the same selection the release workflow makes with
-    # `git ls-remote --tags --refs --sort=-v:refname | head -n1`.
-    local ref ref_desc
-    if (( TAG_MODE )); then
-        info "[$prog] resolving latest tag for $repo"
-        ref=$(git ls-remote --tags --refs --sort=-v:refname "$url" \
-            | head -n1 | sed 's#.*refs/tags/##')
-        if [ -z "$ref" ]; then
-            elapsed=$(( SECONDS - t0 ))
+    # The ref was resolved once for every repo by resolve_refs() before the
+    # hwconfig loop started, so every board in a -c all run builds the same
+    # revision even if a tag lands mid-run.
+    local ref="${REF_OF[$prog]:-}" ref_desc
+    if [ -z "$ref" ]; then
+        elapsed=$(( SECONDS - t0 ))
+        if (( TAG_MODE )); then
             echo "SKIP:no tags found in $repo|$elapsed" > "$status_file"
-            return 0
+        else
+            echo "FAIL:could not resolve a ref for $repo|$elapsed" > "$status_file"
         fi
+        return 0
+    fi
+    if (( TAG_MODE )); then
         ref_desc="tag $ref (submodules pinned in tag)"
     elif (( MAIN_MODE )); then
-        info "[$prog] resolving default branch for $repo"
-        ref=$(default_branch_of "$url")
-        if [ -z "$ref" ]; then
-            elapsed=$(( SECONDS - t0 ))
-            echo "FAIL:could not resolve default branch for $repo|$elapsed" > "$status_file"
-            return 0
-        fi
         ref_desc="$ref (default branch), pico_shared @ $SHARED_BRANCH"
     else
-        ref="$EMU_BRANCH"
-        ref_desc="$EMU_BRANCH, pico_shared @ $SHARED_BRANCH"
+        ref_desc="$ref, pico_shared @ $SHARED_BRANCH"
     fi
 
     hr
@@ -583,28 +692,34 @@ build_one_emulator() {
         cd "$dest"
         if (( TAG_MODE )); then
             # --recurse-submodules already checked them out at the tag's pins.
-            info "[$prog] submodules pinned by tag (pico_shared left as-is)"
-            if [ -d pico_shared ]; then
-                local shared_sha
-                shared_sha=$(git -C pico_shared rev-parse --short HEAD)
-                echo "    -> pico_shared at $shared_sha"
-            fi
+            # Everything except pico_shared stays there.
+            info "[$prog] submodules pinned by tag"
         else
             info "[$prog] initialising submodules (pinned revisions)"
             git submodule update --init --recursive
-            if [ -d pico_shared ]; then
-                info "[$prog] switching pico_shared submodule to '${SHARED_BRANCH}'"
-                (
-                    cd pico_shared
-                    if ! git fetch --depth 1 origin "$SHARED_BRANCH"; then
-                        exit 73
-                    fi
-                    git checkout --detach FETCH_HEAD
-                    local shared_sha
-                    shared_sha=$(git rev-parse --short HEAD)
-                    echo "    -> pico_shared now at $shared_sha"
-                ) || exit 73
-            fi
+        fi
+        # pico_shared moves to $SHARED_BRANCH in every mode. In tag mode that is
+        # not cosmetic: the revision the tag pins has no -b in bld.sh, so leaving
+        # it there makes a bootloader build impossible (see the header comment).
+        if [ -d pico_shared ]; then
+            info "[$prog] switching pico_shared submodule to '${SHARED_BRANCH}'"
+            (
+                cd pico_shared
+                if ! git fetch --depth 1 origin "$SHARED_BRANCH"; then
+                    exit 73
+                fi
+                git checkout --detach FETCH_HEAD
+                echo "    -> pico_shared now at $(git rev-parse --short HEAD)"
+            ) || exit 73
+        fi
+        # Report the tag on the emulator's own menu screen instead of the build
+        # date. Tag mode only: -B/-m have no version to stamp, and leaving the
+        # placeholder is what marks those as dev builds. Must come after the
+        # pico_shared checkout above, which would otherwise refuse to overwrite a
+        # locally modified menu.h.
+        if (( TAG_MODE )); then
+            info "[$prog] stamping SWVERSION = $ref"
+            stamp_swversion "$ref"
         fi
         chmod +x build*.sh bld.sh pico_shared/bld.sh 2>/dev/null || true
         info "[$prog] running ./bld.sh -c $HWCONFIG -2 -b -p $PER_PROC"
@@ -634,6 +749,15 @@ build_one_emulator() {
         return 0
     fi
     local src_uf2="${matches[0]}"
+    # -s, not -f: an interrupted or failed link step can leave a 0-byte UF2
+    # behind, and shipping that in the zip looks like a successful build until
+    # the board refuses to boot.
+    if [ ! -s "$src_uf2" ]; then
+        elapsed=$(( SECONDS - t0 ))
+        echo "MISSING|$elapsed" > "$status_file"
+        warn "[$prog] $(basename "$src_uf2") is empty (0 bytes) — not installing"
+        return 0
+    fi
     cp "$src_uf2" "$dest_uf2"
     local bytes
     bytes=$(stat -c%s "$dest_uf2")
@@ -867,6 +991,67 @@ if (( MULTI )); then
         printf "    HW_CONFIG=%-2s  %-28s  %s\n" "$HW" "${CONFIG_RESULT[$HW]}" "${HW_DESC[$HW]}"
     done
     (( overall_rc != 0 )) && warn "one or more hwconfigs had build failures or produced no UF2s"
+fi
+
+# --- Version manifest + SD-card archive (-z) ---------------------------------
+# emu/versions.txt records the ref every shipped emulator was built from. It is a
+# tracked file with three jobs: it ships inside the zip so users can see what
+# they have, the release workflow renders it into the release notes, and its git
+# diff is the record of what changed between two releases.
+#
+# Only emulators that actually produced a UF2 for at least one board are listed —
+# the manifest describes what shipped, not what was attempted.
+write_versions_manifest() {
+    local out="$LOADER_DIR/emu/versions.txt"
+    local prog hw listed=0
+    {
+        echo "# pico-bootLoader SD-card bundle — emulator versions"
+        echo "# generated by build_emulators.sh; do not edit by hand"
+        echo "#"
+        echo "# Format: <program_name>;<repo>;<ref>;<pico_shared>"
+        echo "#   ref          the release tag the emulator was built from, or"
+        echo "#                <branch>@<shortsha> for repos that carry no tags"
+        echo "#                (fruitjam-doom, which has none)."
+        echo "#   pico_shared  the shared-framework revision it was built against."
+        echo "#                Not the revision the tag pins: bld.sh gained -b only"
+        echo "#                in f2c8be9, which the emulator tags predate."
+        for prog in "${PROG_NAMES[@]}"; do
+            [ -n "${REF_OF[$prog]:-}" ] || continue
+            for hw in "${HWCONFIGS_TO_BUILD[@]}"; do
+                if [ -s "$LOADER_DIR/emu/$hw/${prog}.uf2" ]; then
+                    # Doom vendors no pico_shared, so that column stays empty.
+                    local shared="$SHARED_SHA"
+                    [ -n "${DOOM_BRANCH[$prog]+x}" ] && shared=""
+                    echo "${prog};${REPO_OF[$prog]};${REF_OF[$prog]};${shared}"
+                    listed=$(( listed + 1 ))
+                    break
+                fi
+            done
+        done
+    } > "$out"
+    info "wrote emu/versions.txt ($listed emulator(s))"
+    sed 's/^/    /' "$out"
+}
+
+if (( PACK_ZIP )); then
+    echo
+    hr
+    echo " SD-card archive"
+    hr
+    write_versions_manifest
+
+    PACKER="$LOADER_DIR/.github/scripts/pack_sdcard.sh"
+    [ -f "$PACKER" ] || die "packer not found: $PACKER"
+    [ -x "$PACKER" ] || chmod +x "$PACKER" 2>/dev/null || true
+    ZIP_OUT="$LOADER_DIR/releases/pico-bootLoader_sdcard.zip"
+    mkdir -p "$LOADER_DIR/releases"
+    echo
+    if "$PACKER" "$LOADER_DIR" "$ZIP_OUT"; then
+        info "SD-card archive: $ZIP_OUT ($(human_size "$(stat -c%s "$ZIP_OUT")"))"
+    else
+        warn "packing the SD-card archive failed"
+        overall_rc=1
+    fi
 fi
 
 exit "$overall_rc"
