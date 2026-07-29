@@ -1,8 +1,6 @@
 # pico-bootLoader
 
-[![pico-bootLoader in action](https://img.youtube.com/vi/X-7ZBaCIoeQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=X-7ZBaCIoeQ&t=39s)
 
-*Click the image to watch pico-bootLoader in action.*
 
 pico-bootLoader is a bootloader for RP2350 boards. Its primary purpose is to
 host a collection of retro-game emulators and a port of *Doom* on a single
@@ -24,6 +22,9 @@ starts it. A hardware reset or power cycle always returns to the menu.
 
 *Doom* is included as a native RP2350 port — it is **not** emulated.
 
+[![pico-bootLoader in action](https://img.youtube.com/vi/X-7ZBaCIoeQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=X-7ZBaCIoeQ)
+
+*Click the image to watch pico-bootLoader in action.*
 
 ## Bootable applications
 
