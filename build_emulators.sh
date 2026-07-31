@@ -88,34 +88,47 @@ declare -A REPO_OF=(
     [picosmsPlus]=pico-smsplus
     [picoPacPlus]=pico-pacPlus
     [picosnesPlus]=pico-snesPlus
-    [doom_tiny]=fruitjam-doom
-    [doom_tiny_full]=fruitjam-doom
+    [doom_tiny]=pico-doom
+    [doom_tiny_full]=pico-doom
 )
 
-# fruitjam-doom (Doom!) is a special case. Unlike the emulators above it only
-# targets a handful of specific boards, has no release tags (built from a
-# branch), vendors its own pico-sdk/pico-extras as submodules, and uses a
-# per-board build script. It is built by _build_doom() instead of the generic
-# bld.sh path.
+# pico-doom (Doom!) is a special case. Unlike the emulators above it targets only
+# a handful of specific boards, carries no pico_shared (so there is no SWVERSION
+# to stamp), and uses a per-board build script instead of bld.sh. It is built by
+# _build_doom().
 #
-# Two variants ship from the same repo:
+# Two variants ship from the same repo, and since the full-version branch they
+# ship from the same *ref* — that branch carries the -build-forbootloader.sh and
+# -build-full-forbootloader.sh families for all four boards, where main still has
+# only the shareware half:
 #   doom_tiny       shareware, WHX baked into flash as a companion DATA UF2
 #                   (the emulators.txt aux_uf2 column)
 #   doom_tiny_full  registered/Ultimate DOOM; nothing extra in flash — at boot
 #                   the game copies /roms/doom/doom.whd from the SD card into
 #                   PSRAM, so the board must have PSRAM
-# They live on different branches, so each gets its own clone directory: a
-# shared one would thrash between branches and race when -j >1 builds both at
-# the same time (each drags in a vendored pico-sdk, hence the disk cost).
-DOOM_REPO="fruitjam-doom"
+#
+# Each variant still gets its own clone directory. Not to avoid branch thrashing
+# any more (they share a ref now) but because with -j >1 both variants build at
+# once, and one shared checkout would have two jobs fetching and checking it out
+# concurrently. That is cheap now: pico-doom no longer vendors the SDK,
+# pico-extras or Pico-PIO-USB as submodules — they come from the environment via
+# its pico-env.sh, so a clone is small.
+DOOM_REPO="pico-doom"
+# The branch to build when the repo has no release tag yet. Once pico-doom is
+# tagged, tag mode picks the tag up automatically (see resolve_refs) and this is
+# only the fallback.
 declare -A DOOM_BRANCH=(
-    [doom_tiny]=adafruit-fruitjam
+    [doom_tiny]=full-version
     [doom_tiny_full]=full-version
 )
 declare -A DOOM_CLONE_OF=(
-    [doom_tiny]=fruitjam-doom
-    [doom_tiny_full]=fruitjam-doom-full
+    [doom_tiny]=pico-doom
+    [doom_tiny_full]=pico-doom-full
 )
+# The git ref each variant is actually cloned at — a tag when one exists, else
+# the DOOM_BRANCH above. Filled in by resolve_refs; REF_OF keeps the display and
+# manifest form, which for a branch build carries the sha too.
+declare -A DOOM_CLONE_REF=()
 # Per-variant build script and build tree, as printf formats over the board tag.
 declare -A DOOM_SCRIPT_FMT=(
     [doom_tiny]="%s-build-forbootloader.sh"
@@ -132,7 +145,7 @@ declare -A DOOM_WAD_OF=(
     [doom_tiny]="doom1-whx.uf2"
     [doom_tiny_full]=""
 )
-# HW_CONFIG -> board "tag" used by fruitjam-doom's per-board build scripts, for
+# HW_CONFIG -> board "tag" used by pico-doom's per-board build scripts, for
 # both variants. Each tag <T> implies, for a variant with script format <SF>,
 # build format <BF> and program name <P>:
 #                   build script   printf <SF> <T>
@@ -202,7 +215,7 @@ latest_tag_of() {
 # Must be called with the cwd inside the emulator's clone. Anchored on the
 # #define rather than on the "VX.X" placeholder text, so it stays idempotent and
 # keeps working if the placeholder is ever renamed. Repos without pico_shared
-# (fruitjam-doom) are a no-op.
+# (pico-doom) are a no-op.
 #
 # Deliberately NOT touching pico_set_program_version() in the emulator's
 # CMakeLists.txt: the bootloader reads only the program *name* from binary_info,
@@ -242,6 +255,7 @@ step "git           : $(git --version | head -1)"
 [ -d "$PICO_SDK_PATH" ]     || die "PICO_SDK_PATH ($PICO_SDK_PATH) is not a directory"
 step "PICO_SDK_PATH : $PICO_SDK_PATH"
 step "PICO_PIO_USB  : ${PICO_PIO_USB_PATH:-(unset)}"
+step "PICO_EXTRAS   : ${PICO_EXTRAS_PATH:-(unset)}  (pico-doom only)"
 [ -f "$LOADER_DIR/emu/emulators.txt" ] || die "uf2/emulators.txt not found (run from pico-bootLoader root)"
 step "loader dir    : $LOADER_DIR"
 step "build tree    : $BUILD_DIR  (kept outside the repo)"
@@ -269,6 +283,10 @@ for prog in "${PROG_NAMES[@]}"; do
 done
 
 # --- Determine hwconfig(s) to build ------------------------------------------
+# pico-doom sources its toolchain from the environment (its pico-env.sh) and
+# needs pico-extras; the bld.sh emulators do not. Mirrors piousb_available().
+doom_extras_available() { [ -n "${PICO_EXTRAS_PATH:-}" ] && [ -f "${PICO_EXTRAS_PATH}/external/pico_extras_import.cmake" ]; }
+
 is_known_hwconfig() { local hw="$1" h; for h in "${HWCONFIGS[@]}"; do [ "$h" = "$hw" ] && return 0; done; return 1; }
 hwconfig_needs_piousb() { local hw="$1" c; for c in "${PIOUSB_CONFIGS[@]}"; do [ "$c" = "$hw" ] && return 0; done; return 1; }
 piousb_available() { [ -n "${PICO_PIO_USB_PATH:-}" ] && [ -r "${PICO_PIO_USB_PATH}/src/pio_usb.h" ]; }
@@ -395,10 +413,10 @@ fi
 
 # --- Resolve the ref to build for every emulator, ONCE ------------------------
 # prog_name -> the ref actually built: a tag in tag mode, a branch name in
-# -B/-m, or "<branch>@<shortsha>" for the Doom variants (fruitjam-doom carries
-# no tags, so it is always branch-built and its sha is the only version there
-# is). Empty means "no ref could be resolved" — build_one_emulator turns that
-# into a SKIP.
+# -B/-m, or "<branch>@<shortsha>" when a repo has no tag to build yet — which is
+# pico-doom's situation today, so its sha is the only version string available.
+# Empty means "no ref could be resolved" — build_one_emulator turns that into a
+# SKIP.
 #
 # Resolving up front rather than inside build_one_emulator matters for more than
 # tidiness: with -c all the same repo would otherwise be probed once per
@@ -425,14 +443,25 @@ resolve_refs() {
         url="https://github.com/${GITHUB_OWNER}/${repo}.git"
         ref=""
         if [ -n "${DOOM_BRANCH[$prog]+x}" ]; then
-            # Doom: branch-built in every mode (fruitjam-doom carries no tags), so
-            # branch@shortsha is the only version string there is.
-            local branch="${DOOM_BRANCH[$prog]}" sha=""
-            sha=$(git ls-remote --heads "$url" "$branch" 2>/dev/null | cut -c1-7) || sha=""
-            if [ -n "$sha" ]; then
-                ref="${branch}@${sha}"
+            # Doom builds from a tag when the repo has one — it uses the same
+            # v*.* convention as the emulators — and otherwise from its branch,
+            # where branch@shortsha is the only version string available.
+            local branch="${DOOM_BRANCH[$prog]}" tag="" sha=""
+            if (( TAG_MODE )); then
+                tag="$(latest_tag_of "$url")"
+            fi
+            if [ -n "$tag" ]; then
+                ref="$tag"
+                DOOM_CLONE_REF[$prog]="$tag"
             else
-                warn "[$prog] could not resolve $repo branch '$branch'"
+                sha=$(git ls-remote --heads "$url" "$branch" 2>/dev/null | cut -c1-7) || sha=""
+                if [ -n "$sha" ]; then
+                    ref="${branch}@${sha}"
+                    DOOM_CLONE_REF[$prog]="$branch"
+                    (( TAG_MODE )) && warn "[$prog] $repo has no tags yet — building branch '$branch'"
+                else
+                    warn "[$prog] could not resolve $repo branch '$branch'"
+                fi
             fi
         elif (( TAG_MODE )); then
             ref="$(latest_tag_of "$url")"
@@ -449,38 +478,54 @@ resolve_refs() {
 }
 resolve_refs
 
-# --- Build fruitjam-doom (Doom!) ---------------------------------------------
-# Handles both variants (doom_tiny, doom_tiny_full) — the per-variant branch,
-# build script, build tree and companion WAD all come from the DOOM_* tables
-# above. Builds for whichever HW_CONFIGs appear in DOOM_TAG (2, 8, 13, 14); any
-# other config is skipped cleanly. Clones the variant's branch with its vendored
-# SDK/extras submodules and runs its per-board build script, which emits the app
+# --- Build pico-doom (Doom!) --------------------------------------------------
+# Handles both variants (doom_tiny, doom_tiny_full) — the ref, build script,
+# build tree and companion WAD all come from the DOOM_* tables above. Builds for
+# whichever HW_CONFIGs appear in DOOM_TAG (2, 8, 13, 14); any other config is
+# skipped cleanly. Clones the resolved ref (a release tag when pico-doom has one,
+# otherwise DOOM_BRANCH) and runs its per-board build script, which emits the app
 # UF2 (and, for doom_tiny, a DATA-family WAD UF2) in <build tree>/src/. Installs
 # the app as emu/<hw>/<prog>.uf2 and the WAD, if any, as emu/<hw>/<wad>, then
 # writes the same status contract as build_one_emulator(). The clone is reused
-# across configs within one run — it drags in a vendored pico-sdk, so re-cloning
-# it per board would be wasteful.
+# across configs within one run so the four boards share one checkout.
+#
+# pico-doom takes its toolchain from the environment (pico-env.sh): PICO_SDK_PATH,
+# PICO_EXTRAS_PATH, and PICO_PIO_USB_PATH for the PIO-USB boards. PICO_EXTRAS_PATH
+# is checked before we get here, in the pre-flight.
 _build_doom() {
     local prog="$1" status_file="$2" t0="$3"
     local repo="$DOOM_REPO" branch="${DOOM_BRANCH[$prog]}"
+    # The git ref to check out: a tag if pico-doom has one, else the branch.
+    local cloneref="${DOOM_CLONE_REF[$prog]:-$branch}"
     local dest="$BUILD_DIR/${DOOM_CLONE_OF[$prog]}"
     local url="https://github.com/${GITHUB_OWNER}/${repo}.git"
     local wad="${DOOM_WAD_OF[$prog]:-}"
     local elapsed
 
-    # Only the configs with a per-board build script get a Doom build.
-    local tag="${DOOM_TAG[$HWCONFIG]:-}"
-    if [ -z "$tag" ]; then
+    # Only the configs with a per-board build script get a Doom build. Note this
+    # "board" is pico-doom's own board tag (fruitjam, adafruitdvisd, ...), which
+    # names its script and build tree — nothing to do with a git tag.
+    local board="${DOOM_TAG[$HWCONFIG]:-}"
+    if [ -z "$board" ]; then
         elapsed=$(( SECONDS - t0 ))
         echo "SKIP:$prog not supported for HW_CONFIG=$HWCONFIG (Doom builds for: ${!DOOM_TAG[*]})|$elapsed" > "$status_file"
         return 0
     fi
+
+    # pico-doom's pico-env.sh requires pico-extras; the emulators do not, so this
+    # is a Doom-only skip rather than a pre-flight die. Catch it here instead of
+    # letting the build script fail a minute in with its own error.
+    if ! doom_extras_available; then
+        elapsed=$(( SECONDS - t0 ))
+        echo "SKIP:PICO_EXTRAS_PATH unset or not a pico-extras checkout (pico-doom needs it)|$elapsed" > "$status_file"
+        return 0
+    fi
     local build_script build_subdir
-    printf -v build_script "${DOOM_SCRIPT_FMT[$prog]}" "$tag"
-    printf -v build_subdir "${DOOM_BUILD_FMT[$prog]}" "$tag"
+    printf -v build_script "${DOOM_SCRIPT_FMT[$prog]}" "$board"
+    printf -v build_subdir "${DOOM_BUILD_FMT[$prog]}" "$board"
 
     hr
-    echo " $prog  ($repo @ ${REF_OF[$prog]:-branch $branch})  [HW_CONFIG $HWCONFIG / $tag]"
+    echo " $prog  ($repo @ ${REF_OF[$prog]:-$cloneref})  [HW_CONFIG $HWCONFIG / $board]"
     echo " clone -> $dest"
     hr
 
@@ -503,14 +548,15 @@ _build_doom() {
     fi
 
     # Reuse an existing checkout of the right repo across configs: clone once,
-    # then fast-forward it to the branch tip for later boards. If the update
-    # fails for any reason, fall back to a clean clone.
+    # then move it to the wanted ref for later boards. Detaching works for both a
+    # tag and a branch tip, so the same path serves either. If the update fails
+    # for any reason, fall back to a clean clone.
     if [ -d "$dest/.git" ] && \
        [ "$(git -C "$dest" config --get remote.origin.url 2>/dev/null)" = "$url" ]; then
-        info "[$prog] reusing existing clone at $dest; updating to ${branch} tip"
+        info "[$prog] reusing existing clone at $dest; updating to ${cloneref}"
         if ! ( cd "$dest" \
-                && git fetch --depth 1 origin "$branch" \
-                && git checkout -qB "$branch" FETCH_HEAD \
+                && git fetch --depth 1 origin "$cloneref" \
+                && git checkout -q --detach FETCH_HEAD \
                 && git submodule update --init --recursive ); then
             warn "[$prog] could not update existing clone; re-cloning from scratch"
             rm -rf "$dest"
@@ -519,10 +565,10 @@ _build_doom() {
     if [ ! -d "$dest/.git" ]; then
         info "[$prog] cleaning previous clone (if any)"
         rm -rf "$dest"
-        info "[$prog] cloning ${repo}@${branch} (recursive: vendored pico-sdk/pico-extras)"
-        if ! git clone --branch "$branch" --recurse-submodules --depth 1 "$url" "$dest"; then
+        info "[$prog] cloning ${repo}@${cloneref}"
+        if ! git clone --branch "$cloneref" --recurse-submodules --depth 1 "$url" "$dest"; then
             elapsed=$(( SECONDS - t0 ))
-            echo "FAIL:clone of ${repo}@${branch} failed|$elapsed" > "$status_file"
+            echo "FAIL:clone of ${repo}@${cloneref} failed|$elapsed" > "$status_file"
             return 0
         fi
     fi
@@ -530,10 +576,12 @@ _build_doom() {
     # stale objects behind (each combination has its own build tree).
     rm -rf "$dest/$build_subdir"
 
-    # Guard against a branch that doesn't carry this variant's scripts (yet).
+    # Guard against a ref that doesn't carry this variant's scripts. pico-doom's
+    # main, for one, still has only the shareware -build-forbootloader.sh family;
+    # both variants live on full-version.
     if [ ! -f "$dest/$build_script" ]; then
         elapsed=$(( SECONDS - t0 ))
-        echo "FAIL:$build_script not found in ${repo}@${branch}|$elapsed" > "$status_file"
+        echo "FAIL:$build_script not found in ${repo}@${cloneref}|$elapsed" > "$status_file"
         return 0
     fi
 
@@ -606,7 +654,7 @@ build_one_emulator() {
     local t0 elapsed
     t0=$SECONDS
 
-    # fruitjam-doom builds nothing like the others (a few specific boards,
+    # pico-doom builds nothing like the others (a few specific boards,
     # vendored SDK, its own script, extra WAD UF2). Hand it off entirely.
     if [ -n "${DOOM_BRANCH[$prog]+x}" ]; then
         _build_doom "$prog" "$status_file" "$t0"
@@ -1010,8 +1058,7 @@ write_versions_manifest() {
         echo "#"
         echo "# Format: <program_name>;<repo>;<ref>;<pico_shared>"
         echo "#   ref          the release tag the emulator was built from, or"
-        echo "#                <branch>@<shortsha> for repos that carry no tags"
-        echo "#                (fruitjam-doom, which has none)."
+        echo "#                <branch>@<shortsha> for a repo that has no tag yet."
         echo "#   pico_shared  the shared-framework revision it was built against."
         echo "#                Not the revision the tag pins: bld.sh gained -b only"
         echo "#                in f2c8be9, which the emulator tags predate."

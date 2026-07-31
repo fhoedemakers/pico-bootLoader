@@ -29,10 +29,16 @@ available for dry runs.
 ```bash
 export PICO_SDK_PATH=~/pico/pico-sdk
 export PICO_PIO_USB_PATH=~/pico/Pico-PIO-USB   # required for HW_CONFIG 7, 8, 9, 14
+export PICO_EXTRAS_PATH=~/pico/pico-extras     # required by pico-doom only
 gh auth status                                  # needs repo write
 ```
 
 `zip` or `python3` must be present for the packer (either is fine).
+
+`PICO_EXTRAS_PATH` is a pico-doom requirement, not an emulator one — pico-doom
+takes its whole toolchain from the environment via its `pico-env.sh` rather than
+vendoring it. Leave it unset and the emulators still build; the two Doom variants
+are reported as `SKIP` with the reason, and the archive ships without Doom.
 
 ---
 
