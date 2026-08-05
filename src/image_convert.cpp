@@ -814,18 +814,6 @@ void ic_fb_draw_text_centered(uint16_t *fb, int y_top, const char *text,
     }
 }
 
-void ic_truncate_for_display(const char *name, char *out, int max_chars)
-{
-    int n = (int)strlen(name);
-    if (n <= max_chars) { memcpy(out, name, n); out[n] = '\0'; return; }
-    int head = (max_chars - 3) / 2;
-    int tail = max_chars - 3 - head;
-    memcpy(out, name, head);
-    memcpy(out + head, "...", 3);
-    memcpy(out + head + 3, name + n - tail, tail);
-    out[max_chars] = '\0';
-}
-
 // FNV-1a 64-bit over the lowercased basename. FAT names are case-insensitive,
 // so hash them case-folded to match f_stat's semantics.
 uint64_t ic_name_hash(const char *s, size_t n)
@@ -853,6 +841,21 @@ bool ic_hash_contains(const uint64_t *arr, int n, uint64_t h)
 // ---------------------------------------------------------------------------
 // Public entry points.
 // ---------------------------------------------------------------------------
+
+// Head...tail elision so a long filename fits a fixed-width text column. Used
+// by the conversion progress screen below and by the picker's error screen.
+void ic_truncate_for_display(const char *name, char *out, int max_chars)
+{
+    int n = (int)strlen(name);
+    if (n <= max_chars) { memcpy(out, name, n); out[n] = '\0'; return; }
+    int head = (max_chars - 3) / 2;
+    int tail = max_chars - 3 - head;
+    memcpy(out, name, head);
+    memcpy(out + head, "...", 3);
+    memcpy(out + head + 3, name + n - tail, tail);
+    out[max_chars] = '\0';
+}
+
 int image_convert_batch_dir(const char *dir, uint16_t max_w, uint16_t max_h,
                             bool letterbox, const char *ui_title)
 {

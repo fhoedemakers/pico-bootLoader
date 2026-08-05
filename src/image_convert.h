@@ -33,3 +33,8 @@ bool image_convert_ensure(const char *dir, const char *basename,
 // when the directory can't be opened / scratch allocation fails.
 int image_convert_batch_dir(const char *dir, uint16_t max_w, uint16_t max_h,
                             bool letterbox, const char *ui_title);
+
+// Copy `name` into `out` (which must hold max_chars + 1 bytes), eliding the
+// middle with "..." when it is longer than max_chars. Used wherever a filename
+// has to fit a fixed-width text column.
+void ic_truncate_for_display(const char *name, char *out, int max_chars);

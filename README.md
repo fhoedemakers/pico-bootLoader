@@ -388,7 +388,10 @@ Applications based on `pico_shared` can use its build script instead:
 The loader validates every image before erasing anything: UF2 magic, family ID,
 page alignment, and that every block lands inside the application partition. A
 standalone build still linked at `0x10000000` is rejected on-screen and can
-never overwrite the bootloader.
+never overwrite the bootloader. The rejection screen names the problem — the
+address the image was actually linked at, the family it was built for, or that
+the file is corrupt — and repeats the build flags above; press any button to
+return to the menu.
 
 ### 2. Install it on the SD card
 
@@ -462,8 +465,10 @@ Pico 2 W). `./buildAll.sh` builds every supported board into `releases/`
 
 The image must fit the 512 KB bootloader region; the linker errors out if it
 does not, and every link prints its occupancy. Most configurations sit near
-260 KB (~51%), but the Pico 2 W builds pull in the CYW43 driver and land around
-483 KB (~92%) — that is the configuration to check when adding code.
+265 KB (~51%), but the Pico 2 W builds pull in the CYW43 driver and land around
+497 KB (~97%), leaving about 15 KB free — that is the configuration to check
+when adding code. It is tight enough that the whole project is compiled `-Os`;
+`-O2` no longer links for Pico 2 W (see the comment in `CMakeLists.txt`).
 
 To build the emulators and the *Doom* port themselves,
 [`build_emulators.sh`](build_emulators.sh) clones each source repository and

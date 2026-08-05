@@ -14,6 +14,14 @@ A resident .uf2 bootloader / front-end for the RP2350 retro-emulator family (pic
 - **On-screen help.** Press **START** in either menu mode for a full-screen
   summary of the controls, the meaning of the `*` and `!` markers, and the
   current mode, theme, board configuration and index file.
+- **Rejected-`.uf2` error screen.** When pre-flight validation refuses a file,
+  the loader now says why in plain language instead of flashing a terse notice
+  for three seconds. It names the actual problem — linked at the wrong address
+  (the address is shown), built for the wrong chip or architecture, too large
+  for the board's flash, corrupt, or an incomplete copy — and, where relevant,
+  gives the build flags needed to produce an image the loader accepts. The page
+  stays up until a button is pressed. Nothing is erased at that point, so the
+  menu is still there afterwards.
 - **`GUI` and `THEME` keys in `boot.txt`**, holding the menu mode and the active
   theme.
 
@@ -49,6 +57,20 @@ A resident .uf2 bootloader / front-end for the RP2350 retro-emulator family (pic
   build actually produces. Earlier cards declared `doom1-whx-for-fruitjam.uf2`,
   which the loader could never find, so it launched *Doom* without flashing the
   WAD.
+
+### Fixed
+
+- **A standalone build could be flashed and leave the board unbootable.** An
+  application linked at `0x10000000` but larger than the 512 KB bootloader
+  region straddles the partition boundary: validation skipped every block below
+  `0x10080000` and accepted the tail, so the loader wrote a fragment from the
+  middle of the image into the start of the application partition. The progress
+  bar ran to 100 %, the flashed app then had no usable vector table, and the
+  board rebooted into the menu with no explanation. Any block below the
+  partition now rejects the whole file up front, before anything is erased, and
+  the new error screen names the address it was linked at. Builds smaller than
+  512 KB were already rejected, which is why this only showed up with larger
+  applications.
 
 ## General Info
 

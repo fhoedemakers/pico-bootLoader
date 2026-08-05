@@ -19,7 +19,7 @@ message("* Current build type is : ${CMAKE_BUILD_TYPE}")
 # Hardware / board selection
 # ---------------------------------------------------------------------------
 if(NOT HW_CONFIG)
-    set(HW_CONFIG 8 CACHE STRING "Select the hardware configuration for your board")
+    set(HW_CONFIG 2 CACHE STRING "Select the hardware configuration for your board")
 endif()
 if(NOT USE_HSTX)
     set(USE_HSTX 1 CACHE STRING "Use HSTX for display output when possible")
@@ -42,14 +42,18 @@ add_definitions(-DNDEBUG)
 add_definitions(-DPICO_MALLOC_PANIC=0)
 
 # This image must fit the 512 KB resident bootloader partition. A -O3 (Release)
-# build overflows it by ~44 KB: on this DVI/PNGdec/JPEGDEC-heavy code -O3's
-# inlining and loop unrolling bloat .text/.rodata ~69 KB past the un-optimized
-# -O0 (Debug) build. Force -Os for the whole image so it fits no matter which
+# build overflows it outright: on this DVI/PNGdec/JPEGDEC-heavy code -O3's
+# inlining and loop unrolling bloat .text/.rodata far past what the region
+# holds. Force -Os for the whole image so it fits no matter which
 # CMAKE_BUILD_TYPE is selected (bld.sh forces Release, VSCode defaults to Debug).
 # Directory-scoped and placed before the TinyUSB/SDK includes so it reaches every
 # translation unit; as a trailing compile option the -Os wins over the build
-# type's -O level. Measured flash use, HW_CONFIG 1 / pico2_w:
-#   -O3 108.4% (overflow) | -O2 98.9% (fits, ~6 KB margin) | -Os 94.8% (~27 KB).
+# type's -O level. Measured flash use, HW_CONFIG 1 / pico2_w (the worst case):
+#   -O3 110.9% (overflows by 56 KB) | -O2 101.6% (overflows by 8 KB)
+#   -Os  97.0% (fits, ~15 KB margin)
+# -Os is no longer merely preferable here: -O2 used to fit with ~6 KB to spare
+# and no longer does, so -Os is the only level that links. Re-measure this
+# configuration when adding code.
 # -Os is safe for the display: the real-time TMDS path is hand-written assembly
 # (pico_lib/dvi/tmds_encode.S, RAM-resident .scratch_x/y) and HSTX encodes in
 # hardware -- neither is affected by the C optimization level. Only per-scanline
@@ -95,6 +99,7 @@ include("pico_shared/BootPartition.cmake")
 add_executable(${projectname}
     main.cpp
     src/uf2_loader.c
+    src/uf2_diag.c
     src/flash_writer.c
     src/app_launch.c
     src/storage_pico.c

@@ -54,6 +54,7 @@
 extern "C" {
 #include "boot_config.h"
 #include "uf2_loader.h"
+#include "uf2_diag.h"
 #include "uf2_format.h"
 #include "app_launch.h"
 #include "storage.h"
@@ -674,6 +675,216 @@ void showHelpScreen(bool graphical_mode, const char *index_file, bool cfg_save_f
     }
 }
 
+// --- Rejected-.uf2 error screen ---------------------------------------------
+//
+// Shown when flashAndLaunch()'s pre-flight validation refuses a file. That
+// check runs before anything is erased, so unlike fatalErrorScreen() this page
+// is dismissible and drops the user straight back into the picker.
+//
+// Layout and styling follow drawHelpScreen(): pure charcell, section headings
+// in col 1, body in col 3. Pure charcell means it renders identically on HSTX,
+// PicoDVI-framebuffer and PicoDVI-line-stream, costs nothing beyond the
+// screenBuffer that is already allocated, and -- having no FB-direct layer --
+// is safe to redraw every frame (see the flicker note above fatalErrorScreen).
+
+#define ERR_COL_BODY 3   // section body
+#define ERR_COL_ITEM 5   // indented sub-item (a command line, a family name)
+
+// putText() collapses runs of whitespace AND maps '_' to a space
+// (menu.cpp:589-599). Both are fatal here: this screen prints CMake flags such
+// as -DBUILD_FOR_BOOTLOADER=ON that the user is meant to type back verbatim,
+// underscores and all. Write the cells directly so what is on screen is exactly
+// what was passed in.
+void putTextRaw(int x, int y, const char *text, int fg, int bg)
+{
+    if (!text || x < 0 || y < 0 || y >= SCREEN_ROWS) return;
+    for (int i = 0; text[i] && x + i < SCREEN_COLS; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        if (ch < 32 || ch > 126) ch = ' ';
+        charCell &cell = screenBuffer[y * SCREEN_COLS + x + i];
+        cell.charvalue = (char)ch;
+        cell.fgcolor   = (uint8_t)fg;
+        cell.bgcolor   = (uint8_t)bg;
+    }
+}
+
+struct ErrLine { uint8_t col; const char *text; };
+
+void drawUf2ErrorScreen(const char *filename, const uf2_diag_t *d, bool isAux)
+{
+    ClearScreen(COL_BG);
+
+    char btn1[2], btn2[2];
+    getButtonLabels(btn1, btn2);
+
+    solidBar(0, COL_ERR_FG, COL_ERR_BG);
+    centerText(0, isAux ? "CANNOT FLASH THIS DATA FILE" : "CANNOT FLASH THIS FILE",
+               COL_ERR_FG, COL_ERR_BG);
+
+    putText(1, 2, "FILE", COL_HELP_HDR, COL_BG);
+    char shown[SCREEN_COLS + 1];
+    ic_truncate_for_display(filename ? filename : "(unknown)", shown,
+                            SCREEN_COLS - ERR_COL_BODY - 1);
+    putTextRaw(ERR_COL_BODY, 3, shown, COL_FG, COL_BG);
+
+    // Scratch for the lines that carry addresses. Declared here because the
+    // tables below hold pointers only, so these must outlive them.
+    char a0[SCREEN_COLS + 1], a1[SCREEN_COLS + 1], a2[SCREEN_COLS + 1];
+
+    ErrLine problem[5] = {};
+    ErrLine fix[9]     = {};
+    int np = 0, nf = 0;
+    bool docRef = false;
+
+    auto P = [&](int col, const char *t) { if (np < 5) problem[np++] = { (uint8_t)col, t }; };
+    auto F = [&](int col, const char *t) { if (nf < 9) fix[nf++]     = { (uint8_t)col, t }; };
+
+    // How to produce an image this loader accepts. Kept in sync with the README
+    // section "Creating a bootable build of your own application".
+    auto appBuildRecipe = [&]() {
+        F(ERR_COL_BODY, "Rebuild the application with:");
+        F(ERR_COL_ITEM, "-DBUILD_FOR_BOOTLOADER=ON");
+        F(ERR_COL_ITEM, "-DPICO_PLATFORM=rp2350-arm-s");
+        F(ERR_COL_BODY, "and call, in its CMakeLists.txt:");
+        F(ERR_COL_ITEM, "frens_offset_for_bootloader()");
+        F(ERR_COL_BODY, "");
+        F(ERR_COL_BODY, "Projects built on pico_shared can");
+        F(ERR_COL_BODY, "use: ./bld.sh -2 -c <CONFIG> -b");
+        docRef = true;
+    };
+
+    // The aux blob is a data image emitted by the application's own build (the
+    // Doom WAD), so there is no separate recipe to hand the user.
+    auto auxAdvice = [&]() {
+        F(ERR_COL_BODY, "This is a data file, produced by");
+        F(ERR_COL_BODY, "the application's own build. Copy");
+        F(ERR_COL_BODY, "it again from the release, or");
+        F(ERR_COL_BODY, "rebuild the application.");
+    };
+
+    switch (d->reason) {
+    case UF2_DIAG_WRONG_LINK_ADDR:
+        // The headline case: a standalone build still linked at 0x10000000.
+        snprintf(a1, sizeof(a1), "0x%08X-0x%08X.",
+                 (unsigned)d->region_base, (unsigned)(d->region_end - 1));
+        if (d->have_extent) {
+            snprintf(a0, sizeof(a0), "Image is linked at 0x%08X.",
+                     (unsigned)d->image_base);
+            P(ERR_COL_BODY, a0);
+        } else {
+            P(ERR_COL_BODY, "Image is linked below the app");
+            P(ERR_COL_BODY, "partition.");
+        }
+        P(ERR_COL_BODY, "The loader can only write to");
+        P(ERR_COL_ITEM, a1);
+        isAux ? auxAdvice() : appBuildRecipe();
+        break;
+
+    case UF2_DIAG_WRONG_FAMILY:
+        snprintf(a0, sizeof(a0), "%s (0x%08X)",
+                 uf2_family_name(d->family), (unsigned)d->family);
+        snprintf(a1, sizeof(a1), "%s (0x%08X)",
+                 uf2_family_name(d->expected_family), (unsigned)d->expected_family);
+        P(ERR_COL_BODY, "This file is built for:");
+        P(ERR_COL_ITEM, a0);
+        P(ERR_COL_BODY, "The loader needs:");
+        P(ERR_COL_ITEM, a1);
+        isAux ? auxAdvice() : appBuildRecipe();
+        break;
+
+    case UF2_DIAG_TOO_LARGE:
+        snprintf(a1, sizeof(a1), "Usable flash ends at 0x%08X.",
+                 (unsigned)d->region_end);
+        if (d->have_extent) {
+            snprintf(a0, sizeof(a0), "Image ends at 0x%08X.", (unsigned)d->image_end);
+            P(ERR_COL_BODY, a0);
+            P(ERR_COL_BODY, a1);
+            if (d->image_end > d->region_end) {
+                snprintf(a2, sizeof(a2), "%u KB too big for this board.",
+                         (unsigned)((d->image_end - d->region_end + 1023) / 1024));
+                P(ERR_COL_BODY, a2);
+            }
+        } else {
+            P(ERR_COL_BODY, "The image does not fit in this");
+            P(ERR_COL_BODY, "board's flash.");
+            P(ERR_COL_BODY, a1);
+        }
+        F(ERR_COL_BODY, "Use a board with more flash, or");
+        F(ERR_COL_BODY, "a smaller build of this");
+        F(ERR_COL_BODY, isAux ? "data file." : "application.");
+        break;
+
+    case UF2_DIAG_CORRUPT:
+        P(ERR_COL_BODY, "This is not a valid UF2 file");
+        P(ERR_COL_BODY, "(bad magic, or blocks that are");
+        P(ERR_COL_BODY, "misaligned or truncated).");
+        F(ERR_COL_BODY, "Copy the file to the SD card");
+        F(ERR_COL_BODY, "again - the copy on the card is");
+        F(ERR_COL_BODY, "damaged or incomplete.");
+        break;
+
+    case UF2_DIAG_UNREADABLE:
+        // Covers both a real SD read error and a file that ends mid-block,
+        // which is what an interrupted copy to the card looks like.
+        P(ERR_COL_BODY, "The file could not be read in");
+        P(ERR_COL_BODY, "full - it is damaged, or was");
+        P(ERR_COL_BODY, "copied to the card incompletely.");
+        F(ERR_COL_BODY, "Check the SD card, then copy the");
+        F(ERR_COL_BODY, "file again.");
+        break;
+
+    default:
+        P(ERR_COL_BODY, "The loader rejected it:");
+        P(ERR_COL_ITEM, uf2_load_result_str(d->result));
+        isAux ? auxAdvice() : appBuildRecipe();
+        break;
+    }
+
+    putText(1, 5, "PROBLEM", COL_HELP_HDR, COL_BG);
+    for (int i = 0; i < np; i++) {
+        putTextRaw(problem[i].col, 6 + i, problem[i].text, COL_FG, COL_BG);
+    }
+
+    if (nf > 0) {
+        putText(1, 11, "HOW TO FIX", COL_HELP_HDR, COL_BG);
+        for (int i = 0; i < nf; i++) {
+            putTextRaw(fix[i].col, 12 + i, fix[i].text, COL_FG, COL_BG);
+        }
+    }
+
+    if (docRef) {
+        putTextRaw(ERR_COL_BODY, 25, "More: the pico-bootLoader README,", COL_FG, COL_BG);
+        putTextRaw(ERR_COL_BODY, 26, "\"Creating a bootable build\".", COL_FG, COL_BG);
+    }
+
+    char foot[SCREEN_COLS + 1];
+    solidBar(28, COL_BAR_FG, COL_BAR_BG);
+    snprintf(foot, sizeof(foot), "Press START or %s to return", btn1);
+    centerText(28, foot, COL_BAR_FG, COL_BAR_BG);
+}
+
+// Show the rejection page until the user dismisses it. Same pump as
+// showHelpScreen(): pure charcell, so redrawing every frame is idempotent.
+void showUf2ErrorScreen(const char *filename, const uf2_diag_t *d, bool isAux)
+{
+    using Btn = io::GamePadState::Button;
+
+    drawUf2ErrorScreen(filename, d, isAux);
+
+    // ~0u so the A press that started the launch isn't immediately read as the
+    // press that dismisses this screen.
+    uint32_t prev = ~0u;
+    for (;;) {
+        uint32_t btns   = readPads();
+        uint32_t pushed = btns & ~prev;
+        prev = btns;
+
+        DrawScreen(-1);
+
+        if (pushed & (Btn::START | Btn::A | Btn::B | Btn::SELECT)) break;
+    }
+}
+
 // Pump USB + render for a fixed time (display stays live).
 void idleFor(int ms)
 {
@@ -995,9 +1206,20 @@ void flashAndLaunch(int idx, bool flashEmu, bool flashAux, const uf2_fingerprint
         uf2_load_result_t vr = uf2_validate_file(full, &st);
         LOG("  result: %s", uf2_load_result_str(vr));
         if (vr != UF2_LOAD_OK) {
-            LOG("REJECTED: %s", uf2_load_result_str(vr));
-            showMessage("Cannot flash this file:", g_emus[idx].filename, uf2_load_result_str(vr));
-            idleFor(3000);
+            // Nothing has been erased yet, so this is recoverable: diagnose why
+            // the file was refused and hold a dismissible page up until the user
+            // acknowledges it, rather than flashing a terse notice for 3 s and
+            // dropping back into the picker as if nothing happened.
+            uf2_diag_t d;
+            uf2_diagnose(full, vr, APP_BASE_ADDR, appFlashEnd(),
+                         UF2_FAMILY_RP2350_ARM_S, &d);
+            LOG("REJECTED: %s -> %s (image 0x%08X-0x%08X%s, family 0x%08X, "
+                "first out-of-range block 0x%08X)",
+                uf2_load_result_str(vr), uf2_diag_reason_str(d.reason),
+                (unsigned)d.image_base, (unsigned)d.image_end,
+                d.have_extent ? "" : ", unknown", (unsigned)d.family,
+                (unsigned)st.lowest_out_of_range);
+            showUf2ErrorScreen(g_emus[idx].filename, &d, false);
             return;
         }
     }
@@ -1020,9 +1242,15 @@ void flashAndLaunch(int idx, bool flashEmu, bool flashAux, const uf2_fingerprint
             UF2_FAMILY_RP2350_DATA, &astp);
         LOG("  result: %s", uf2_load_result_str(vr));
         if (vr != UF2_LOAD_OK) {
-            LOG("REJECTED aux: %s", uf2_load_result_str(vr));
-            showMessage("Cannot flash aux blob:", g_emus[idx].aux_uf2, uf2_load_result_str(vr));
-            idleFor(3000);
+            uf2_diag_t d;
+            uf2_diagnose(auxFull, vr,
+                         auxFp->image_base, auxFp->image_base + auxFp->image_size,
+                         UF2_FAMILY_RP2350_DATA, &d);
+            LOG("REJECTED aux: %s -> %s (image 0x%08X-0x%08X%s, family 0x%08X)",
+                uf2_load_result_str(vr), uf2_diag_reason_str(d.reason),
+                (unsigned)d.image_base, (unsigned)d.image_end,
+                d.have_extent ? "" : ", unknown", (unsigned)d.family);
+            showUf2ErrorScreen(g_emus[idx].aux_uf2, &d, true);
             return;
         }
     }
@@ -1124,6 +1352,21 @@ void flashAndLaunch(int idx, bool flashEmu, bool flashAux, const uf2_fingerprint
         handoffToApp(g_emus[idx].label);
     }
     LOG("ERROR: app_launch_present()=false after flash; rebooting.");
+
+    // The image flashed and verified but has no usable vector table, so we are
+    // about to reboot into the menu. Say so first: an unexplained bounce back
+    // to the picker right after a full progress bar is exactly the "it silently
+    // did nothing" experience this screen work exists to remove.
+    //
+    // HSTX only -- the picoDVI path reset core1 before flashing, so there is no
+    // display left to draw on and the LED heartbeat is all the user gets.
+#if HSTX
+    showMessage("Flashed, but the app will",
+                "not start. Returning to menu.",
+                "Rebuild it for the bootloader.");
+    DrawScreen(-1);
+    idleFor(4000);
+#endif
 
     // Reboot to recover a clean state; the resume check's app_launch_present()
     // guard prevents jumping into a half-written partition.
