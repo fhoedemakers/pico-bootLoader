@@ -83,33 +83,40 @@ jobs:
             run: |
                  ls -l releases/
 
-          # Release notes = a header describing what kind of release this is, the
-          # emulator versions the SD-card archive ships (emu/versions.txt, written
-          # by build_emulators.sh -z and committed), then CHANGELOG.md.
+          # Release notes = CHANGELOG.md as written (its own title, intro, General
+          # Info and the v0.N section), then the generated tail: for a v0.N.M tag a
+          # note that the firmware did not change, and the emulator versions the
+          # SD-card archive ships (emu/versions.txt, written by
+          # build_emulators.sh -z and committed).
+          #
+          # The table goes last on purpose: it closes the page just above the asset
+          # list GitHub renders, which is what "at the end of this page" in the
+          # CHANGELOG's General Info refers to.
           #
           # The SD-card archive itself is built locally, not here — see the release
-          # procedure in README.md — and attached with `gh release upload`.
+          # procedure in RELEASING.md — and attached with `gh release upload`.
           - name: Generate release notes
             if: steps.ver.outputs.tag != ''
             env:
                 TAG: ${{ steps.ver.outputs.tag }}
             run: |
-                 : > release-notes.md
+                 cat CHANGELOG.md > release-notes.md
                  # A three-component tag (v0.N.M) means the loader firmware did not
                  # change; only the emulator binaries on the card did.
                  if [ "$(printf '%s' "$TAG" | tr -cd '.' | wc -c)" -ge 2 ]; then
                       baseline="${TAG%.*}"
                       {
+                        echo
                         echo "> **SD-card content update.** The bootloader firmware is unchanged since"
                         echo "> [\`$baseline\`](${{ github.server_url }}/${{ github.repository }}/releases/tag/$baseline) — you do **not** need to re-flash"
                         echo "> the board. Only the emulator binaries in \`pico-bootLoader_sdcard.zip\`"
                         echo "> changed; replace the \`/emu\` folder on the SD card."
-                        echo
                       } >> release-notes.md
                  fi
                  if [ -f emu/versions.txt ]; then
                       {
-                        echo "### Emulator versions in \`pico-bootLoader_sdcard.zip\`"
+                        echo
+                        echo "## Emulator versions in \`pico-bootLoader_sdcard.zip\`"
                         echo
                         echo "| Emulator | Repository | Version | pico_shared |"
                         echo "|---|---|---|---|"
@@ -118,11 +125,9 @@ jobs:
                           case "$prog" in ''|\#*) continue ;; esac
                           echo "| \`$prog\` | [$repo](https://github.com/${{ github.repository_owner }}/$repo) | $ref | ${shared:-–} |" >> release-notes.md
                       done < emu/versions.txt
-                      echo >> release-notes.md
                  else
                       echo "NOTE: emu/versions.txt is absent; release notes carry no emulator version table." >&2
                  fi
-                 cat CHANGELOG.md >> release-notes.md
                  echo "----- release-notes.md -----"
                  cat release-notes.md
 

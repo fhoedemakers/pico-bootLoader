@@ -2,6 +2,10 @@
 
 A resident .uf2 bootloader / front-end for the RP2350 retro-emulator family (pico-infonesPlus, pico-pcePlus, pico-genesisPlus, pico-smsplus, pico-peanutGB, …).
 
+## General Info
+
+[Binaries for each configuration and PCB design are at the end of this page](#downloads___).
+
 ## v0.2
 
 ### Added
@@ -83,10 +87,6 @@ A resident .uf2 bootloader / front-end for the RP2350 retro-emulator family (pic
   the new error screen names the address it was linked at. Builds smaller than
   512 KB were already rejected, which is why this only showed up with larger
   applications.
-
-## General Info
-
-[Binaries for each configuration and PCB design are at the end of this page](#downloads___).
 
 ## Getting started
 
