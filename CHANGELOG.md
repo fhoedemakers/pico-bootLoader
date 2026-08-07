@@ -2,7 +2,7 @@
 
 A resident .uf2 bootloader / front-end for the RP2350 retro-emulator family (pico-infonesPlus, pico-pcePlus, pico-genesisPlus, pico-smsplus, pico-peanutGB, …).
 
-## Unreleased
+## v0.2
 
 ### Added
 
@@ -12,20 +12,6 @@ A resident .uf2 bootloader / front-end for the RP2350 retro-emulator family (pic
   DVI + MicroSD breakout combination (2) and the Murmulator M2 (13), and needs
   PSRAM on all three. `DUKE3D.GRP` streams from `/roms/duke3d/` on the SD card,
   so there is no companion data image to flash.
-
-### Changed
-
-- **The SD-card archive no longer leaves a menu entry without artwork.** It still
-  ships the small `.444`/`.555` caches in preference to the source images, but
-  where a theme has no cache for an entry its `.png`/`.jpg` now ships instead and
-  the first boot converts it.
-- `build_emulators.sh` builds *Doom* from pico-doom `main`, which carries the
-  build scripts for both variants since the `full-version` merge.
-
-## v0.2
-
-### Added
-
 - **Artwork themes.** The graphical menu can carry up to ten sets of artwork in
   `<BASEDIR>/assets/themes/0` … `themes/9`. Press **UP** or **DOWN** in the
   graphical menu to cycle through the themes present on the card; the choice is
@@ -47,6 +33,12 @@ A resident .uf2 bootloader / front-end for the RP2350 retro-emulator family (pic
 
 ### Changed
 
+- **The SD-card archive no longer leaves a menu entry without artwork.** It still
+  ships the small `.444`/`.555` caches in preference to the source images, but
+  where a theme has no cache for an entry its `.png`/`.jpg` now ships instead and
+  the first boot converts it.
+- `build_emulators.sh` builds *Doom* from pico-doom `main`, which carries the
+  build scripts for both variants since the `full-version` merge.
 - **Menu artwork moved** from `<BASEDIR>/assets` to
   `<BASEDIR>/assets/themes/0`. Existing cards are migrated automatically on the
   first boot — the cached `.444`/`.555` files move too, so nothing is
