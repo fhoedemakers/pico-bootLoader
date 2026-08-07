@@ -53,7 +53,7 @@ The following emulators need a bios in `/bios` on SD:
 
 *Doom* runs on four boards: Adafruit Fruit Jam (HW_CONFIG 8), the Adafruit DVI +
 MicroSD breakout combination (2), Murmulator M2 (13) and Adafruit Feather RP2350
-+ TLV320DAC3100 (14). It ships in two variants: `doom_tiny`, the shareware
+with a TLV320DAC3100 (14). It ships in two variants: `doom_tiny`, the shareware
 episode, distributed as the engine `.uf2` together with a companion WAD data
 image (see [Auxiliary data images](#auxiliary-data-images)); and
 `doom_tiny_full`, registered/Ultimate DOOM, which carries no WAD in flash and
