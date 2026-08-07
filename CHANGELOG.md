@@ -2,6 +2,26 @@
 
 A resident .uf2 bootloader / front-end for the RP2350 retro-emulator family (pico-infonesPlus, pico-pcePlus, pico-genesisPlus, pico-smsplus, pico-peanutGB, …).
 
+## Unreleased
+
+### Added
+
+- **Duke Nukem 3D**, a native RP2350 port from
+  [pico-duke3D](https://github.com/fhoedemakers/pico-duke3D), joins the menu as
+  `duke3d_game`. It runs on the Adafruit Fruit Jam (HW_CONFIG 8), the Adafruit
+  DVI + MicroSD breakout combination (2) and the Murmulator M2 (13), and needs
+  PSRAM on all three. `DUKE3D.GRP` streams from `/roms/duke3d/` on the SD card,
+  so there is no companion data image to flash.
+
+### Changed
+
+- **The SD-card archive no longer leaves a menu entry without artwork.** It still
+  ships the small `.444`/`.555` caches in preference to the source images, but
+  where a theme has no cache for an entry its `.png`/`.jpg` now ships instead and
+  the first boot converts it.
+- `build_emulators.sh` builds *Doom* from pico-doom `main`, which carries the
+  build scripts for both variants since the `full-version` merge.
+
 ## v0.2
 
 ### Added

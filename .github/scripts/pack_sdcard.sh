@@ -13,7 +13,8 @@
 #   emu/emulators.txt
 #   emu/boot.example.txt
 #   emu/versions.txt                     (if present; written by build_emulators.sh -z)
-#   emu/assets/themes/<0-9>/<image_key>.{444,555}
+#   emu/assets/themes/<0-9>/<image_key>.{444,555}   (or the .png/.jpg source,
+#                                        for a key that has no cache to ship)
 #   emu/assets/screensaver/<sprite>.{444,555}
 #
 # Usage: pack_sdcard.sh <loader_dir> <output_zip>
@@ -103,15 +104,22 @@ else
     warn "emu/versions.txt not found — the archive will not record emulator versions"
 fi
 
-# --- Parse the index: prog -> aux_uf2 ----------------------------------------
+# --- Parse the index: prog -> aux_uf2, plus the artwork keys ------------------
 # Format: <program_name>;<image_key>;<display_name>[;<aux_uf2>]
 PROG_NAMES=()
+IMAGE_KEYS=()
 declare -A AUX_OF=()
-while IFS=';' read -r prog _img _name aux || [ -n "${prog:-}" ]; do
+declare -A SEEN_KEY=()
+while IFS=';' read -r prog img _name aux || [ -n "${prog:-}" ]; do
     [ -z "${prog:-}" ] && continue
     [[ "$prog" == \#* ]] && continue
     PROG_NAMES+=("$prog")
     AUX_OF[$prog]="$(printf '%s' "${aux:-}" | tr -d '[:space:]')"
+    img="$(printf '%s' "${img:-}" | tr -d '[:space:]')"
+    if [ -n "$img" ] && [ -z "${SEEN_KEY[$img]+x}" ]; then
+        SEEN_KEY[$img]=1
+        IMAGE_KEYS+=("$img")
+    fi
 done < "$LOADER/emu/emulators.txt"
 [ ${#PROG_NAMES[@]} -gt 0 ] || die "no emulators listed in emu/emulators.txt"
 
@@ -171,10 +179,20 @@ if [ "$empty" -gt 0 ]; then
 fi
 
 # --- Menu artwork ------------------------------------------------------------
-# Only the preconverted .444/.555 caches ship; the .png/.jpg sources stay in the
-# repo (the loader converts at boot only when a cache is absent, and the sources
-# would roughly double the archive).
+# Preconverted .444/.555 caches ship in preference to anything else: the .png/.jpg
+# sources are ~30x larger and shipping both would roughly double the archive.
+#
+# But a key with no cache would otherwise have no image on the card at all, and
+# the loader can only convert what is there — so for those, and only those, the
+# source image ships instead and the first boot converts it.
+#
+# Sources are looked up by image_key from emulators.txt rather than globbed:
+# theme folders also hold unused icons (2600.png, gba.png, recent.png, ...) and
+# alternates (md-alt.png, sms_gg_alt.png). Globbing would ship those and, worse,
+# make the loader convert them at boot — it converts every image in every theme,
+# which is the expensive path.
 asset_count=0
+src_count=0
 for theme in "$LOADER/emu/assets/themes/"[0-9]; do
     [ -d "$theme" ] || continue
     tnum="$(basename "$theme")"
@@ -189,8 +207,32 @@ for theme in "$LOADER/emu/assets/themes/"[0-9]; do
             asset_count=$((asset_count + 1))
         done
     done
+
+    for key in "${IMAGE_KEYS[@]}"; do
+        # Either cache is enough for the loader to render; it regenerates the
+        # other on first boot.
+        if [ -s "$theme/$key.444" ] || [ -s "$theme/$key.555" ]; then
+            continue
+        fi
+        packed_src=0
+        for ext in png jpg jpeg; do
+            if [ -s "$theme/$key.$ext" ]; then
+                cp "$theme/$key.$ext" "$DEST/assets/themes/$tnum/$key.$ext"
+                echo "  pack theme $tnum $key.$ext  (no .444/.555 cache; converted on first boot)"
+                src_count=$((src_count + 1))
+                packed_src=1
+                break
+            fi
+        done
+        # Theme 0 is the documented fallback for every other theme, so a key it
+        # cannot render at all is worth flagging. Partial non-zero themes are by
+        # design (README: "Incomplete themes are fine") and stay quiet.
+        if [ "$packed_src" -eq 0 ] && [ "$tnum" = 0 ]; then
+            warn "theme 0 has no artwork for '$key' (no .444/.555 and no .png/.jpg) — it will show as a black tile"
+        fi
+    done
 done
-echo "  pack $asset_count theme asset(s)"
+echo "  pack $asset_count theme asset(s), $src_count uncached source image(s)"
 
 ss_count=0
 if [ -d "$LOADER/emu/assets/screensaver" ]; then

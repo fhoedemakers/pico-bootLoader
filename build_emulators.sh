@@ -90,73 +90,107 @@ declare -A REPO_OF=(
     [picosnesPlus]=pico-snesPlus
     [doom_tiny]=pico-doom
     [doom_tiny_full]=pico-doom
+    [duke3d_game]=pico-duke3D
 )
 
-# pico-doom (Doom!) is a special case. Unlike the emulators above it targets only
-# a handful of specific boards, carries no pico_shared (so there is no SWVERSION
-# to stamp), and uses a per-board build script instead of bld.sh. It is built by
-# _build_doom().
+# --- Script-built apps -------------------------------------------------------
+# The native ports (Doom!, Duke Nukem 3D) are special cases. Unlike the
+# emulators above they target only a handful of specific boards, carry no
+# pico_shared (so there is no SWVERSION to stamp), and use a per-board build
+# script instead of bld.sh. They are built by _build_scripted(); membership in
+# the family is exactly "has a SCRIPTED_BRANCH entry".
 #
-# Two variants ship from the same repo, and since the full-version branch they
-# ship from the same *ref* — that branch carries the -build-forbootloader.sh and
-# -build-full-forbootloader.sh families for all four boards, where main still has
-# only the shareware half:
+# pico-doom ships two variants from the same repo and from the same *ref*: since
+# full-version was merged, main carries the -build-forbootloader.sh and
+# -build-full-forbootloader.sh families for all four boards.
 #   doom_tiny       shareware, WHX baked into flash as a companion DATA UF2
 #                   (the emulators.txt aux_uf2 column)
 #   doom_tiny_full  registered/Ultimate DOOM; nothing extra in flash — at boot
 #                   the game copies /roms/doom/doom.whd from the SD card into
 #                   PSRAM, so the board must have PSRAM
 #
-# Each variant still gets its own clone directory. Not to avoid branch thrashing
-# any more (they share a ref now) but because with -j >1 both variants build at
-# once, and one shared checkout would have two jobs fetching and checking it out
-# concurrently. That is cheap now: pico-doom no longer vendors the SDK,
-# pico-extras or Pico-PIO-USB as submodules — they come from the environment via
-# its pico-env.sh, so a clone is small.
-DOOM_REPO="pico-doom"
-# The branch to build when the repo has no release tag yet. Once pico-doom is
+# pico-duke3D ships one, duke3d_game. It keeps nothing in flash at all:
+# DUKE3D.GRP streams from /roms/duke3d on the SD card and savegames sit next to
+# it, so there is no companion data image. It needs PSRAM on every board.
+#
+# Every variant gets its own clone directory, even when two share a repo. Not to
+# avoid branch thrashing (the Doom pair share a ref now) but because with -j >1
+# both build at once, and one shared checkout would have two jobs fetching and
+# checking it out concurrently. That is cheap: neither repo vendors the SDK,
+# pico-extras or Pico-PIO-USB as submodules — they come from the environment —
+# so a clone is small. (pico-duke3D does track an 11 MB DUKE3D.GRP, which a
+# --depth 1 clone still pulls; the clone is reused across boards within a run.)
+
+# The branch to build when the repo has no release tag yet. Once the repo is
 # tagged, tag mode picks the tag up automatically (see resolve_refs) and this is
 # only the fallback.
-declare -A DOOM_BRANCH=(
-    [doom_tiny]=full-version
-    [doom_tiny_full]=full-version
+declare -A SCRIPTED_BRANCH=(
+    [doom_tiny]=main
+    [doom_tiny_full]=main
+    [duke3d_game]=fix/audio-production-rate
 )
-declare -A DOOM_CLONE_OF=(
+declare -A SCRIPTED_CLONE_OF=(
     [doom_tiny]=pico-doom
     [doom_tiny_full]=pico-doom-full
+    [duke3d_game]=pico-duke3D
 )
 # The git ref each variant is actually cloned at — a tag when one exists, else
-# the DOOM_BRANCH above. Filled in by resolve_refs; REF_OF keeps the display and
-# manifest form, which for a branch build carries the sha too.
-declare -A DOOM_CLONE_REF=()
+# the SCRIPTED_BRANCH above. Filled in by resolve_refs; REF_OF keeps the display
+# and manifest form, which for a branch build carries the sha too.
+declare -A SCRIPTED_CLONE_REF=()
 # Per-variant build script and build tree, as printf formats over the board tag.
-declare -A DOOM_SCRIPT_FMT=(
+declare -A SCRIPTED_SCRIPT_FMT=(
     [doom_tiny]="%s-build-forbootloader.sh"
     [doom_tiny_full]="%s-build-full-forbootloader.sh"
+    [duke3d_game]="%s-build-forbootloader.sh"
 )
-declare -A DOOM_BUILD_FMT=(
+declare -A SCRIPTED_BUILD_FMT=(
     [doom_tiny]="build_bl_%s"
     [doom_tiny_full]="build_bl_full_%s"
+    [duke3d_game]="build_bl_%s"
 )
-# Companion DATA-family WAD UF2 the variant must produce (emulators.txt aux_uf2
-# column), or "" when it needs none. Every per-board build script that emits a
-# WAD emits it under exactly this name.
-declare -A DOOM_WAD_OF=(
+# Where under the build tree the produced UF2s land. pico-doom puts them in
+# src/; pico-duke3D one level deeper, in src/pico/.
+declare -A SCRIPTED_OUT_SUBDIR=(
+    [doom_tiny]="src"
+    [doom_tiny_full]="src"
+    [duke3d_game]="src/pico"
+)
+# Companion DATA-family UF2 the variant must produce (emulators.txt aux_uf2
+# column), or "" when it needs none. Every per-board build script that emits one
+# emits it under exactly this name.
+declare -A SCRIPTED_AUX_OF=(
     [doom_tiny]="doom1-whx.uf2"
     [doom_tiny_full]=""
+    [duke3d_game]=""
 )
-# HW_CONFIG -> board "tag" used by pico-doom's per-board build scripts, for
-# both variants. Each tag <T> implies, for a variant with script format <SF>,
-# build format <BF> and program name <P>:
+# 1 for a variant whose build resolves its toolchain through pico-extras.
+# pico-doom does (via its pico-env.sh); pico-duke3D does not, so it must still
+# build when PICO_EXTRAS_PATH is unset.
+declare -A SCRIPTED_NEEDS_EXTRAS=(
+    [doom_tiny]=1
+    [doom_tiny_full]=1
+    [duke3d_game]=0
+)
+# HW_CONFIG -> board "tag" naming the per-board build script and build tree.
+# Shared across the family: the tag is the board's canonical short name and both
+# repos use the same spelling. Each tag <T> implies, for a variant with script
+# format <SF>, build format <BF>, output subdir <SD> and program name <P>:
 #                   build script   printf <SF> <T>
-#                   build output    printf <BF> <T>/src/<P>.uf2   (app)
-#                   WAD produced    printf <BF> <T>/src/${DOOM_WAD_OF[<P>]}
-# The keys are exactly the configs Doom supports; any other config is skipped.
-declare -A DOOM_TAG=(
+#                   build output    printf <BF> <T>/<SD>/<P>.uf2   (app)
+#                   aux produced    printf <BF> <T>/<SD>/${SCRIPTED_AUX_OF[<P>]}
+declare -A BOARD_TAG=(
     [2]=adafruitdvisd    # Adafruit DVI + MicroSD breakouts
     [8]=fruitjam         # Adafruit Fruit Jam
     [13]=murmulatorm2    # Murmulator M2
     [14]=featherrp2350   # Adafruit Feather RP2350 + TLV320DAC3100
+)
+# The HW_CONFIGs each variant has a build script for; any other config is
+# skipped cleanly. Every entry must have a BOARD_TAG.
+declare -A SCRIPTED_HWCONFIGS=(
+    [doom_tiny]="2 8 13 14"
+    [doom_tiny_full]="2 8 13 14"
+    [duke3d_game]="2 8 13"
 )
 
 # Supported RP2350-ARM hwconfigs + descriptors from pico_shared/bld.sh case
@@ -442,22 +476,23 @@ resolve_refs() {
         repo="${REPO_OF[$prog]}"
         url="https://github.com/${GITHUB_OWNER}/${repo}.git"
         ref=""
-        if [ -n "${DOOM_BRANCH[$prog]+x}" ]; then
-            # Doom builds from a tag when the repo has one — it uses the same
-            # v*.* convention as the emulators — and otherwise from its branch,
-            # where branch@shortsha is the only version string available.
-            local branch="${DOOM_BRANCH[$prog]}" tag="" sha=""
+        if [ -n "${SCRIPTED_BRANCH[$prog]+x}" ]; then
+            # A script-built port builds from a tag when its repo has one — they
+            # use the same v*.* convention as the emulators — and otherwise from
+            # its branch, where branch@shortsha is the only version string
+            # available.
+            local branch="${SCRIPTED_BRANCH[$prog]}" tag="" sha=""
             if (( TAG_MODE )); then
                 tag="$(latest_tag_of "$url")"
             fi
             if [ -n "$tag" ]; then
                 ref="$tag"
-                DOOM_CLONE_REF[$prog]="$tag"
+                SCRIPTED_CLONE_REF[$prog]="$tag"
             else
                 sha=$(git ls-remote --heads "$url" "$branch" 2>/dev/null | cut -c1-7) || sha=""
                 if [ -n "$sha" ]; then
                     ref="${branch}@${sha}"
-                    DOOM_CLONE_REF[$prog]="$branch"
+                    SCRIPTED_CLONE_REF[$prog]="$branch"
                     (( TAG_MODE )) && warn "[$prog] $repo has no tags yet — building branch '$branch'"
                 else
                     warn "[$prog] could not resolve $repo branch '$branch'"
@@ -478,51 +513,56 @@ resolve_refs() {
 }
 resolve_refs
 
-# --- Build pico-doom (Doom!) --------------------------------------------------
-# Handles both variants (doom_tiny, doom_tiny_full) — the ref, build script,
-# build tree and companion WAD all come from the DOOM_* tables above. Builds for
-# whichever HW_CONFIGs appear in DOOM_TAG (2, 8, 13, 14); any other config is
-# skipped cleanly. Clones the resolved ref (a release tag when pico-doom has one,
-# otherwise DOOM_BRANCH) and runs its per-board build script, which emits the app
-# UF2 (and, for doom_tiny, a DATA-family WAD UF2) in <build tree>/src/. Installs
-# the app as emu/<hw>/<prog>.uf2 and the WAD, if any, as emu/<hw>/<wad>, then
-# writes the same status contract as build_one_emulator(). The clone is reused
-# across configs within one run so the four boards share one checkout.
+# --- Build a script-built port (Doom!, Duke Nukem 3D) ------------------------
+# Handles every member of the family — the ref, build script, build tree, output
+# subdirectory and companion data image all come from the SCRIPTED_* tables
+# above. Builds for whichever HW_CONFIGs the variant lists in SCRIPTED_HWCONFIGS;
+# any other config is skipped cleanly. Clones the resolved ref (a release tag
+# when the repo has one, otherwise SCRIPTED_BRANCH) and runs its per-board build
+# script, which emits the app UF2 (and, for doom_tiny, a DATA-family WAD UF2) in
+# <build tree>/<out subdir>/. Installs the app as emu/<hw>/<prog>.uf2 and the aux
+# image, if any, as emu/<hw>/<aux>, then writes the same status contract as
+# build_one_emulator(). The clone is reused across configs within one run so a
+# variant's boards share one checkout.
 #
-# pico-doom takes its toolchain from the environment (pico-env.sh): PICO_SDK_PATH,
-# PICO_EXTRAS_PATH, and PICO_PIO_USB_PATH for the PIO-USB boards. PICO_EXTRAS_PATH
-# is checked before we get here, in the pre-flight.
-_build_doom() {
+# These repos take their toolchain from the environment: PICO_SDK_PATH,
+# PICO_PIO_USB_PATH for the PIO-USB boards, and — for the variants that say so in
+# SCRIPTED_NEEDS_EXTRAS — PICO_EXTRAS_PATH.
+_build_scripted() {
     local prog="$1" status_file="$2" t0="$3"
-    local repo="$DOOM_REPO" branch="${DOOM_BRANCH[$prog]}"
-    # The git ref to check out: a tag if pico-doom has one, else the branch.
-    local cloneref="${DOOM_CLONE_REF[$prog]:-$branch}"
-    local dest="$BUILD_DIR/${DOOM_CLONE_OF[$prog]}"
+    local repo="${REPO_OF[$prog]}" branch="${SCRIPTED_BRANCH[$prog]}"
+    # The git ref to check out: a tag if the repo has one, else the branch.
+    local cloneref="${SCRIPTED_CLONE_REF[$prog]:-$branch}"
+    local dest="$BUILD_DIR/${SCRIPTED_CLONE_OF[$prog]}"
     local url="https://github.com/${GITHUB_OWNER}/${repo}.git"
-    local wad="${DOOM_WAD_OF[$prog]:-}"
+    local aux="${SCRIPTED_AUX_OF[$prog]:-}"
     local elapsed
 
-    # Only the configs with a per-board build script get a Doom build. Note this
-    # "board" is pico-doom's own board tag (fruitjam, adafruitdvisd, ...), which
+    # Only the configs this variant has a per-board build script for. Note this
+    # "board" is the repo's own board tag (fruitjam, adafruitdvisd, ...), which
     # names its script and build tree — nothing to do with a git tag.
-    local board="${DOOM_TAG[$HWCONFIG]:-}"
+    local supported="${SCRIPTED_HWCONFIGS[$prog]:-}" board="" hw
+    for hw in $supported; do
+        [ "$hw" = "$HWCONFIG" ] && { board="${BOARD_TAG[$hw]:-}"; break; }
+    done
     if [ -z "$board" ]; then
         elapsed=$(( SECONDS - t0 ))
-        echo "SKIP:$prog not supported for HW_CONFIG=$HWCONFIG (Doom builds for: ${!DOOM_TAG[*]})|$elapsed" > "$status_file"
+        echo "SKIP:$prog not supported for HW_CONFIG=$HWCONFIG ($prog builds for: $supported)|$elapsed" > "$status_file"
         return 0
     fi
 
-    # pico-doom's pico-env.sh requires pico-extras; the emulators do not, so this
-    # is a Doom-only skip rather than a pre-flight die. Catch it here instead of
-    # letting the build script fail a minute in with its own error.
-    if ! doom_extras_available; then
+    # pico-doom's pico-env.sh requires pico-extras; the emulators and pico-duke3D
+    # do not, so this is a per-variant skip rather than a pre-flight die. Catch
+    # it here instead of letting the build script fail a minute in with its own
+    # error.
+    if [ "${SCRIPTED_NEEDS_EXTRAS[$prog]:-0}" = 1 ] && ! doom_extras_available; then
         elapsed=$(( SECONDS - t0 ))
-        echo "SKIP:PICO_EXTRAS_PATH unset or not a pico-extras checkout (pico-doom needs it)|$elapsed" > "$status_file"
+        echo "SKIP:PICO_EXTRAS_PATH unset or not a pico-extras checkout ($repo needs it)|$elapsed" > "$status_file"
         return 0
     fi
     local build_script build_subdir
-    printf -v build_script "${DOOM_SCRIPT_FMT[$prog]}" "$board"
-    printf -v build_subdir "${DOOM_BUILD_FMT[$prog]}" "$board"
+    printf -v build_script "${SCRIPTED_SCRIPT_FMT[$prog]}" "$board"
+    printf -v build_subdir "${SCRIPTED_BUILD_FMT[$prog]}" "$board"
 
     hr
     echo " $prog  ($repo @ ${REF_OF[$prog]:-$cloneref})  [HW_CONFIG $HWCONFIG / $board]"
@@ -530,15 +570,15 @@ _build_doom() {
     hr
 
     # Drop any artifacts from a previous run up front, so a failed rebuild can
-    # never leave a stale <prog>.uf2 (or its WAD) behind in emu/$HWCONFIG/. Only
-    # touch this variant's files: with -j >1 the other variant may be building
+    # never leave a stale <prog>.uf2 (or its aux image) behind in emu/$HWCONFIG/.
+    # Only touch this variant's files: with -j >1 another variant may be building
     # into the same directory right now.
     local out_dir="$LOADER_DIR/emu/$HWCONFIG"
     mkdir -p "$out_dir"
     info "[$prog] removing any previous emu/$HWCONFIG/ $prog artifacts"
     rm -f "$out_dir/${prog}.uf2"
-    if [ -n "$wad" ]; then
-        rm -f "$out_dir/$wad"
+    if [ -n "$aux" ]; then
+        rm -f "$out_dir/$aux"
         # Also sweep the old per-board WAD name emulators.txt used to declare, so
         # a card refreshed from an earlier build doesn't keep an orphan around.
         shopt -s nullglob
@@ -602,7 +642,11 @@ _build_doom() {
     fi
 
     info "[$prog] locating produced UF2s"
-    local src_dir="$dest/$build_subdir/src"
+    # The subdirectory differs per repo: pico-doom emits into src/, pico-duke3D
+    # into src/pico/. Naming the exact file rather than globbing *.uf2 also keeps
+    # us off pico-duke3D's duke3d.uf2, the M0 bring-up harness its Fruit Jam
+    # build tree carries alongside the game.
+    local src_dir="$dest/$build_subdir/${SCRIPTED_OUT_SUBDIR[$prog]}"
     local app_uf2="$src_dir/${prog}.uf2"
     # -s, not -f: this build has been observed to leave a 0-byte doom_tiny.uf2
     # behind, which a plain -f test happily reported as BUILT and shipped.
@@ -613,26 +657,27 @@ _build_doom() {
         return 0
     fi
 
-    # Companion DATA-family WAD (emulators.txt aux_uf2), for the variants that
+    # Companion DATA-family image (emulators.txt aux_uf2), for the variants that
     # bake one into flash. Those variants are unplayable without it, so a missing
-    # WAD is a build failure. doom_tiny_full has none: it reads the full WHD off
-    # the SD card at boot.
+    # image is a build failure. doom_tiny_full has none (it reads the full WHD off
+    # the SD card at boot) and neither does duke3d_game (DUKE3D.GRP streams from
+    # the card).
     local aux_uf2=""
-    if [ -n "$wad" ]; then
-        aux_uf2="$src_dir/$wad"
+    if [ -n "$aux" ]; then
+        aux_uf2="$src_dir/$aux"
         if [ ! -s "$aux_uf2" ]; then
             elapsed=$(( SECONDS - t0 ))
-            echo "FAIL:WAD $wad not produced by $build_script (missing or empty)|$elapsed" > "$status_file"
+            echo "FAIL:aux image $aux not produced by $build_script (missing or empty)|$elapsed" > "$status_file"
             return 0
         fi
     fi
 
     cp "$app_uf2" "$out_dir/${prog}.uf2"
-    if [ -n "$wad" ]; then
-        cp "$aux_uf2" "$out_dir/$wad"
-        info "[$prog] installed WAD $(basename "$aux_uf2") -> emu/$HWCONFIG/$wad"
+    if [ -n "$aux" ]; then
+        cp "$aux_uf2" "$out_dir/$aux"
+        info "[$prog] installed aux image $(basename "$aux_uf2") -> emu/$HWCONFIG/$aux"
     else
-        info "[$prog] no companion WAD: reads /roms/doom/doom.whd off the SD card at boot"
+        info "[$prog] no companion data image: reads its game data off the SD card"
     fi
 
     local bytes
@@ -654,10 +699,11 @@ build_one_emulator() {
     local t0 elapsed
     t0=$SECONDS
 
-    # pico-doom builds nothing like the others (a few specific boards,
-    # vendored SDK, its own script, extra WAD UF2). Hand it off entirely.
-    if [ -n "${DOOM_BRANCH[$prog]+x}" ]; then
-        _build_doom "$prog" "$status_file" "$t0"
+    # The native ports build nothing like the emulators (a few specific boards,
+    # no pico_shared, their own per-board script, maybe an aux data UF2). Hand
+    # them off entirely.
+    if [ -n "${SCRIPTED_BRANCH[$prog]+x}" ]; then
+        _build_scripted "$prog" "$status_file" "$t0"
         return 0
     fi
 
@@ -1066,9 +1112,10 @@ write_versions_manifest() {
             [ -n "${REF_OF[$prog]:-}" ] || continue
             for hw in "${HWCONFIGS_TO_BUILD[@]}"; do
                 if [ -s "$LOADER_DIR/emu/$hw/${prog}.uf2" ]; then
-                    # Doom vendors no pico_shared, so that column stays empty.
+                    # The native ports vendor no pico_shared, so that column
+                    # stays empty for them.
                     local shared="$SHARED_SHA"
-                    [ -n "${DOOM_BRANCH[$prog]+x}" ] && shared=""
+                    [ -n "${SCRIPTED_BRANCH[$prog]+x}" ] && shared=""
                     echo "${prog};${REPO_OF[$prog]};${REF_OF[$prog]};${shared}"
                     listed=$(( listed + 1 ))
                     break

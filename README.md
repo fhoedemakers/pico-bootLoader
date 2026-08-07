@@ -3,9 +3,9 @@
 
 
 pico-bootLoader is a bootloader for RP2350 boards. Its primary purpose is to
-host a collection of retro-game emulators and a port of *Doom* on a single
-board and to let the user choose which one to run from an on-screen menu,
-without reconnecting the board to a computer.
+host a collection of retro-game emulators and native ports of *Doom* and
+*Duke Nukem 3D* on a single board and to let the user choose which one to run
+from an on-screen menu, without reconnecting the board to a computer.
 
 It is not limited to emulation, though: any RP2350 application can be made
 bootable and added to the menu — see [Creating a bootable build of your own
@@ -20,7 +20,8 @@ mode with full-screen artwork per application or a plain text mode. Selecting an
 entry flashes the corresponding application (if it is not already resident) and
 starts it. A hardware reset or power cycle always returns to the menu.
 
-*Doom* is included as a native RP2350 port — it is **not** emulated.
+*Doom* and *Duke Nukem 3D* are included as native RP2350 ports — they are
+**not** emulated.
 
 ## Video
 
@@ -31,7 +32,7 @@ starts it. A hardware reset or power cycle always returns to the menu.
 
 ## Bootable applications
 
-The following emulators and the *Doom* port are supported. Each is built from
+The following emulators and native ports are supported. Each is built from
 its own repository and identified by the program name embedded in its `.uf2`.
 
 | System | Program name | Source repository | |
@@ -43,6 +44,7 @@ its own repository and identified by the program name embedded in its `.uf2`.
 | Sega Master System / Game Gear | `picosmsPlus` | [pico-smsplus](https://github.com/fhoedemakers/pico-smsplus) |<img width="1920" height="1080" alt="Screenshot 2026-07-10 12-33-32" src="https://github.com/user-attachments/assets/864730f3-e33a-49a6-8e10-fd6a656ea901" /> |
 | Philips Videopac / Magnavox Odyssey² | `picoPacPlus` | [pico-pacPlus](https://github.com/fhoedemakers/pico-pacPlus) | <img width="1920" height="1080" alt="Screenshot 2026-07-10 12-38-53" src="https://github.com/user-attachments/assets/413f44e3-9eca-4106-a5a8-0dccb024b286" /> |
 | **Doom** (native port, not emulated) | `doom_tiny` | [pico-doom](https://github.com/fhoedemakers/pico-doom) | <img width="1920" height="1080" alt="Screenshot 2026-07-10 12-29-53" src="https://github.com/user-attachments/assets/2a101f0d-39d4-493e-bf73-4452737f723a" />  |
+| **Duke Nukem 3D** (native port, not emulated) | `duke3d_game` | [pico-duke3D](https://github.com/fhoedemakers/pico-duke3D) | |
 
 The following emulators need a bios in `/bios` on SD:
 - *Nintendo Entertainment System* : For Famicom Dsik System games `fds-bios.rom`
@@ -57,6 +59,14 @@ image (see [Auxiliary data images](#auxiliary-data-images)); and
 `doom_tiny_full`, registered/Ultimate DOOM, which carries no WAD in flash and
 instead reads `/roms/doom/doom.whd` from the SD card at boot, so it needs a board
 with PSRAM.
+
+*Duke Nukem 3D* runs on three boards: Adafruit Fruit Jam (HW_CONFIG 8), the
+Adafruit DVI + MicroSD breakout combination (2, on a Pimoroni Pico Plus 2) and
+Murmulator M2 (13). It needs **PSRAM** on all three. There is no companion data
+image: `DUKE3D.GRP` — shareware or registered/Atomic — is streamed from
+`/roms/duke3d/` on the SD card, with savegames and `duke3d.cfg` written next to
+it. Only the Fruit Jam has been tested on hardware; boards 2 and 13 build clean
+but are untested.
 
 *PCEngine CD* needs PSRAM
 
@@ -135,7 +145,7 @@ to emulator selection* to reboot back into this menu.
    `RP2350` drive.
 2. **Prepare the SD card.** Download `pico-bootLoader_sdcard.zip` from the same
    Releases page and unpack it onto a FAT32- or exFAT-formatted card. The
-   archive contains the emulators, the *Doom* port, the menu artwork, and a
+   archive contains the emulators, the native ports, the menu artwork, and a
    sample configuration file. Alternatively, assemble the layout yourself as
    described in [SD card layout](#sd-card-layout).
 3. **Run it.** Insert the card and power on the board. The menu appears.
@@ -282,6 +292,12 @@ HSTX boards). Both are always written, so the same card works in every supported
 board. The `.444`/`.555` files must not be authored by hand; when a source image
 is replaced under the same name, its stale `.444`/`.555` files should be deleted
 so they regenerate.
+
+The released SD-card archive ships the cached `.444`/`.555` files rather than the
+source images — they are far smaller, and shipping both would roughly double the
+download. Where a theme has no cache for an entry, its source image ships instead
+and the first boot converts it, so nothing in the menu is ever left without
+artwork.
 
 | | Menu artwork | Screensaver |
 |---|---|---|
@@ -470,7 +486,7 @@ does not, and every link prints its occupancy. Most configurations sit near
 when adding code. It is tight enough that the whole project is compiled `-Os`;
 `-O2` no longer links for Pico 2 W (see the comment in `CMakeLists.txt`).
 
-To build the emulators and the *Doom* port themselves,
+To build the emulators and the native ports themselves,
 [`build_emulators.sh`](build_emulators.sh) clones each source repository and
 produces the bootloader-format `.uf2` files, placing them under `emu/<HW_CONFIG>/`.
 
@@ -490,18 +506,27 @@ stamps a version.
 > `-b`-capable `pico_shared` and are re-tagged, this substitution becomes a
 > no-op.
 
-*Doom* is the exception to all of the above: [pico-doom](https://github.com/fhoedemakers/pico-doom)
-has no `pico_shared`, so there is no `SWVERSION` to stamp, and it builds through
-its own per-board scripts rather than `bld.sh`. It has no release tag yet, so tag
-mode falls back to its `full-version` branch — the branch that carries the build
-scripts for both variants, where `main` still has only the shareware half — and
-records `full-version@<sha>` as the version. When pico-doom is tagged (it uses
-the same `v*.*` convention), tag mode picks the tag up with no change here.
+The native ports are the exception to all of the above. Neither
+[pico-doom](https://github.com/fhoedemakers/pico-doom) nor
+[pico-duke3D](https://github.com/fhoedemakers/pico-duke3D) has a `pico_shared`,
+so there is no `SWVERSION` to stamp, and both build through their own per-board
+`<board>-build-forbootloader.sh` scripts rather than `bld.sh`. Each targets only
+the boards it has a script for — *Doom* 2, 8, 13 and 14, *Duke Nukem 3D* 2, 8 and
+13 — and is reported as `SKIP` for every other configuration.
 
-*Doom* also needs `PICO_EXTRAS_PATH` pointing at a
+Neither repository has a release tag yet, so tag mode falls back to a branch and
+records `<branch>@<sha>` as the version: `main` for *Doom*, which since the
+`full-version` merge carries the build scripts for both variants, and
+`fix/audio-production-rate` for *Duke Nukem 3D*, whose `main` does not yet carry
+its build scripts. Both repositories use the same `v*.*` tag convention as the
+emulators, so tag mode picks a tag up with no change here as soon as one is
+pushed.
+
+*Doom* additionally needs `PICO_EXTRAS_PATH` pointing at a
 [pico-extras](https://github.com/raspberrypi/pico-extras) checkout, since it
 resolves its whole toolchain from the environment. Without it the two Doom
-variants are skipped with that reason and everything else still builds.
+variants are skipped with that reason and everything else — *Duke Nukem 3D*
+included — still builds.
 
 ```bash
 ./build_emulators.sh -c 8            # one board, latest tags
@@ -539,7 +564,7 @@ gh release upload v0.2.1 releases/pico-bootLoader_sdcard.zip
 
 - Menu and screensaver artwork is taken from **Ducalex — retro-go**
   ([github.com/ducalex/retro-go](https://github.com/ducalex/retro-go)).
-- The emulator cores and the *Doom* port are the work of their upstream authors;
+- The emulator cores and the native ports are the work of their upstream authors;
   see the repository links under [Bootable
   applications](#bootable-applications).
 - This project was developed with the assistance of AI

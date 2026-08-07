@@ -37,8 +37,9 @@ gh auth status                                  # needs repo write
 
 `PICO_EXTRAS_PATH` is a pico-doom requirement, not an emulator one — pico-doom
 takes its whole toolchain from the environment via its `pico-env.sh` rather than
-vendoring it. Leave it unset and the emulators still build; the two Doom variants
-are reported as `SKIP` with the reason, and the archive ships without Doom.
+vendoring it. Leave it unset and everything else still builds, pico-duke3D
+included; the two Doom variants are reported as `SKIP` with the reason, and the
+archive ships without Doom.
 
 ---
 
@@ -75,9 +76,9 @@ changes but the board does not need re-flashing.
 
 Check the grand summary before going further. Every emulator should be `BUILT`
 for the boards it supports. `SKIP` is expected for excluded combinations
-(`picogenesisPlus` on HW 7; Doom outside boards 2, 8, 13, 14). Any `FAIL` or
-`MISSING` means the archive is incomplete — fix it and re-run rather than
-shipping a partial card.
+(`picogenesisPlus` on HW 7; Doom outside boards 2, 8, 13, 14; `duke3d_game`
+outside boards 2, 8, 13). Any `FAIL` or `MISSING` means the archive is
+incomplete — fix it and re-run rather than shipping a partial card.
 
 The packer refuses to build an archive containing a 0-byte `.uf2`, so a failed
 link cannot ship silently. If it stops with

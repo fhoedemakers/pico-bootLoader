@@ -13,6 +13,7 @@ PicoPeanutGB;pico-peanutGB;v0.11;c0971c5
 picosmsPlus;pico-smsplus;v0.26;c0971c5
 picogenesisPlus;pico-genesisPlus;v0.13;c0971c5
 picoPacPlus;pico-pacPlus;v0.2;c0971c5
-doom_tiny;pico-doom;full-version@58b690b;
-doom_tiny_full;pico-doom;full-version@58b690b;
+doom_tiny;pico-doom;main@0a166ad;
+doom_tiny_full;pico-doom;main@0a166ad;
 picosnesPlus;pico-snesPlus;v0.2;c0971c5
+duke3d_game;pico-duke3D;fix/audio-production-rate@561c34b;
