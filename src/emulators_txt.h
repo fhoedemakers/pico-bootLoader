@@ -9,11 +9,11 @@
  *   picogenesisPlus;md;Sega Genesis/Mega Drive
  *
  * Example (four columns - emulator with a companion data blob):
- *   doom_tiny;doom;Doom!;doom1-whx-for-fruitjam.uf2
+ *   doom_tiny;doom;Doom!;doom1-whx.uf2
  *
  * - program_name matches the value extracted from each UF2's binary_info
  *   (see program_name.h). Comparison is case-insensitive.
- * - image_key picks the artwork file under /emu/assets/<key>.444 (PicoDVI)
+ * - image_key picks the artwork file under /emu/assets/themes/<N>/<key>.444 (PicoDVI)
  *   or .555 (HSTX).
  * - display_name is the human-readable label shown in the text menu.
  * - aux_uf2 (optional) names a second .uf2 in the same config dir that

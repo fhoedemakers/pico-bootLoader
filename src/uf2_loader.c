@@ -61,6 +61,7 @@ const char *uf2_load_result_str(uf2_load_result_t r)
     case UF2_LOAD_BAD_FILE:            return "corrupt or misaligned UF2";
     case UF2_LOAD_VERIFY_FAILED:       return "flash verify mismatch";
     case UF2_LOAD_TOO_LARGE:           return "image exceeds available flash";
+    case UF2_LOAD_WRONG_ADDRESS:       return "linked outside the app partition";
     default:                           return "unknown";
     }
 }
@@ -93,14 +94,24 @@ static uf2_load_result_t validate_pass(uint32_t region_base,
             break;
         }
         case UF2_CLS_OUT_OF_RANGE:
-            /* A block whose payload would land at or past the region end
-             * means the image is too big for this partition. Refuse rather
-             * than silently truncating. Blocks below region_base (e.g. a UF2
-             * still linked to the bootloader area) stay as a soft skip so we
-             * don't reject files with a stray low block. */
+            /* Past the region end: the image is too big for this partition.
+             * Refuse rather than silently truncating. */
             if (blk.target_addr >= region_base) return UF2_LOAD_TOO_LARGE;
-            st->skipped_blocks++;
-            break;
+
+            /* Below region_base: this image was linked for the bootloader's
+             * own area, i.e. built without -DBUILD_FOR_BOOTLOADER=ON. It used
+             * to be a soft skip, which was only safe by accident -- a
+             * standalone build SMALLER than the bootloader region ends up with
+             * no in-range blocks at all and falls out below as
+             * NO_MATCHING_BLOCKS. One that is LARGER straddles the boundary:
+             * its low blocks were skipped, its tail classified as PROGRAM, and
+             * the loader happily wrote that mid-image fragment to the start of
+             * the partition, leaving an unbootable app (progress bar fills,
+             * app_launch_present() then fails and reboots into the menu).
+             * A correctly linked image never has a block down here, so reject
+             * the whole file on the first one. */
+            st->lowest_out_of_range = blk.target_addr;
+            return UF2_LOAD_WRONG_ADDRESS;
         case UF2_CLS_SKIP:
             st->skipped_blocks++;
             break;
@@ -208,10 +219,11 @@ uf2_load_result_t uf2_validate_file_ex(const char *name,
 
     uf2_load_result_t rr = validate_pass(region_base, region_end, expected_family, &st);
     storage_close();
-    if (rr != UF2_LOAD_OK) return rr;
 
+    /* Copy the stats out even on failure: what the walk saw before it gave up
+     * (notably lowest_out_of_range) is what the caller reports to the user. */
     if (stats) *stats = st;
-    return UF2_LOAD_OK;
+    return rr;
 }
 
 uf2_load_result_t uf2_load_file(const char *name,

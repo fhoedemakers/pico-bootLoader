@@ -16,6 +16,7 @@ typedef enum {
     UF2_LOAD_BAD_FILE,           /* misaligned size / corrupt blocks            */
     UF2_LOAD_VERIFY_FAILED,
     UF2_LOAD_TOO_LARGE,          /* image extends past the chip's real flash     */
+    UF2_LOAD_WRONG_ADDRESS,      /* linked below the partition (standalone build)*/
 } uf2_load_result_t;
 
 typedef struct {
@@ -24,6 +25,8 @@ typedef struct {
     uint32_t skipped_blocks;   /* wrong family / NOT_MAIN_FLASH / out of range  */
     uint32_t lowest_addr;      /* lowest flash address written (absolute)       */
     uint32_t highest_addr;     /* one past the highest address written          */
+    uint32_t lowest_out_of_range; /* target of the block that tripped
+                                   * UF2_LOAD_WRONG_ADDRESS (0 otherwise)       */
 } uf2_load_stats_t;
 
 /* Phase codes for the progress callback. Integer codes (rather than string

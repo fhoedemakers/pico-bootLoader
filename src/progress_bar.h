@@ -32,9 +32,15 @@ extern "C" {
  * progress fraction in arbitrary units (e.g. numer=37, denom=100). The bar's
  * geometry is fixed; only the fill width changes.
  *
+ * A "nn%" label (numer/denom as a rounded-down percentage) is drawn in a
+ * fixed-width field immediately below the bar, at pixel rows 182..189.
+ * Callers must leave that band free.
+ *
  * col_fill   - 16-bit pixel value for the filled part of the bar
- * col_empty  - 16-bit pixel value for the empty part of the bar
- * col_border - 16-bit pixel value for the 1-px border around the bar
+ * col_empty  - 16-bit pixel value for the empty part of the bar, and for the
+ *              background of the percentage label
+ * col_border - 16-bit pixel value for the 1-px border around the bar, and for
+ *              the percentage label's text
  *
  * Pixel format follows whatever the active backend uses (RGB444 for
  * PicoDVI, RGB555 for HSTX). The values are written as opaque uint16_t,

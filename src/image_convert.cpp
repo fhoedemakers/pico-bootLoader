@@ -814,18 +814,6 @@ void ic_fb_draw_text_centered(uint16_t *fb, int y_top, const char *text,
     }
 }
 
-void ic_truncate_for_display(const char *name, char *out, int max_chars)
-{
-    int n = (int)strlen(name);
-    if (n <= max_chars) { memcpy(out, name, n); out[n] = '\0'; return; }
-    int head = (max_chars - 3) / 2;
-    int tail = max_chars - 3 - head;
-    memcpy(out, name, head);
-    memcpy(out + head, "...", 3);
-    memcpy(out + head + 3, name + n - tail, tail);
-    out[max_chars] = '\0';
-}
-
 // FNV-1a 64-bit over the lowercased basename. FAT names are case-insensitive,
 // so hash them case-folded to match f_stat's semantics.
 uint64_t ic_name_hash(const char *s, size_t n)
@@ -853,6 +841,21 @@ bool ic_hash_contains(const uint64_t *arr, int n, uint64_t h)
 // ---------------------------------------------------------------------------
 // Public entry points.
 // ---------------------------------------------------------------------------
+
+// Head...tail elision so a long filename fits a fixed-width text column. Used
+// by the conversion progress screen below and by the picker's error screen.
+void ic_truncate_for_display(const char *name, char *out, int max_chars)
+{
+    int n = (int)strlen(name);
+    if (n <= max_chars) { memcpy(out, name, n); out[n] = '\0'; return; }
+    int head = (max_chars - 3) / 2;
+    int tail = max_chars - 3 - head;
+    memcpy(out, name, head);
+    memcpy(out + head, "...", 3);
+    memcpy(out + head + 3, name + n - tail, tail);
+    out[max_chars] = '\0';
+}
+
 int image_convert_batch_dir(const char *dir, uint16_t max_w, uint16_t max_h,
                             bool letterbox, const char *ui_title)
 {
@@ -992,13 +995,15 @@ int image_convert_batch_dir(const char *dir, uint16_t max_w, uint16_t max_h,
     int n_ok = 0;
     for (int i = 0; i < nqueue; i++) {
         if (fb) {
-            for (int y = 188; y < 200; y++) {
+            // Band starts at 190: the progress bar's percentage label occupies
+            // 182..189, so clearing any higher would clip its bottom rows.
+            for (int y = 190; y < 202; y++) {
                 uint16_t *row = fb + y * SCREENWIDTH;
                 for (int x = 0; x < SCREENWIDTH; x++) row[x] = COL_BG;
             }
             char shown[FF_MAX_LFN + 1];
             ic_truncate_for_display(queue[i], shown, SCREENWIDTH / FONT_CHAR_WIDTH);
-            ic_fb_draw_text_centered(fb, 190, shown, COL_FG, COL_BG);
+            ic_fb_draw_text_centered(fb, 192, shown, COL_FG, COL_BG);
             progress_bar_draw((uint32_t)i, (uint32_t)nqueue,
                               COL_FILL, COL_EMPTY, COL_BORDER);
         }

@@ -7,6 +7,13 @@
 # If /boot.txt is absent, the bootloader uses the built-in defaults (equivalent
 # to the values shown below, EXCEPT for SCREENSAVER -- see its note).
 #
+# THE BOOTLOADER WRITES THIS FILE. Changing the menu mode (SELECT) or the
+# artwork theme (UP/DOWN) rewrites the GUI= and THEME= lines. Everything else --
+# your comments, your ordering, your spacing -- is preserved exactly. If the
+# file does not exist yet it is created on the first such change. The update is
+# written to /boot.txt.tmp, verified, and only then renamed into place, so a
+# power cut cannot corrupt your configuration.
+#
 # Syntax:
 #   - One KEY=VALUE per line.
 #   - Whitespace around the '=' and around the value is trimmed.
@@ -24,11 +31,15 @@
 # the .guimode persistence file.
 #
 # Layout expected under BASEDIR:
-#   <BASEDIR>/<HW_CONFIG>/*.uf2          emulator/app images for this board
-#   <BASEDIR>/<INDEX>                    the allow-list (see INDEX below)
-#   <BASEDIR>/assets/<key>.444|.555      per-app splash artwork
-#   <BASEDIR>/assets/screensaver/*       screensaver sprites (optional)
-#   <BASEDIR>/.guimode                   remembers text vs graphical mode
+#   <BASEDIR>/<HW_CONFIG>/*.uf2            emulator/app images for this board
+#   <BASEDIR>/<INDEX>                      the allow-list (see INDEX below)
+#   <BASEDIR>/assets/themes/0/<key>.png    default artwork theme
+#   <BASEDIR>/assets/themes/1..9/          optional extra themes (see THEME)
+#   <BASEDIR>/assets/screensaver/*         screensaver sprites (optional)
+#
+# Cards from earlier releases keep their artwork loose in <BASEDIR>/assets.
+# The bootloader moves those files into assets/themes/0 on the first boot;
+# the screensaver folder is left where it is.
 #
 # Default: /emu
 #
@@ -65,3 +76,42 @@ INDEX=emulators.txt
 # does).
 #
 SCREENSAVER=STARFIELD
+
+
+# --- GUI ---------------------------------------------------------------------
+# Which menu the bootloader starts in. SELECT switches between them at any time
+# and rewrites this line, so it always reflects the mode you left the menu in.
+#
+#   0   Text menu: a plain scrolling list of the applications on the card.
+#   1   Graphical menu: full-screen artwork per application, one at a time.
+#
+# Default: 1
+#
+# (Replaces the <BASEDIR>/.guimode file used by earlier releases. If that file
+# is still on your card its value is copied here on the first boot and the file
+# is then deleted.)
+#
+GUI=1
+
+
+# --- THEME -------------------------------------------------------------------
+# Active artwork theme for the graphical menu, 0 through 9. Themes are folders:
+#
+#   <BASEDIR>/assets/themes/0/     theme 0 -- the default, and the fallback
+#   <BASEDIR>/assets/themes/1/     theme 1
+#   ...                            up to theme 9
+#
+# Each folder holds one image per application, named after the image_key from
+# the index file -- so a theme folder might contain nes.png, md.png, doom.png.
+# A theme does not have to be complete: any application it has no image for
+# falls back to theme 0.
+#
+# UP and DOWN in the graphical menu cycle through the themes that actually
+# exist on the card and rewrite this line. Themes listed here but missing from
+# the card fall back to 0.
+#
+# Screensaver images are NOT themed -- they stay in <BASEDIR>/assets/screensaver.
+#
+# Default: 0
+#
+THEME=0
