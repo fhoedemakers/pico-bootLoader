@@ -109,9 +109,10 @@ For board-by-board wiring, supported display modes and more refer to the [pico-i
    sample configuration file.
 3. **Run it.** Insert the card and power on the board. The menu appears.
 
-## Metadata
-Download the full metadata pack [here](https://1drv.ms/u/c/db8991463e5b8b0c/IQD1kFD0-j94QoCW3Tw447AaAVq2XdkmUH4T40Bcmtf9ZL0?e=8eNkSe) and extract it to the root of the SD card. This should create a `/metadata` folder on the card.
 
 <a name="downloads___"></a>
+
+## Metadata
+Download the full metadata pack [here](https://1drv.ms/u/c/db8991463e5b8b0c/IQD1kFD0-j94QoCW3Tw447AaAVq2XdkmUH4T40Bcmtf9ZL0?e=8eNkSe) and extract it to the root of the SD card. This should create a `/metadata` folder on the card.
 
 
