@@ -567,6 +567,8 @@ gh release upload v0.2.1 releases/pico-bootLoader_sdcard.zip
 - The emulator cores and the native ports are the work of their upstream authors;
   see the repository links under [Bootable
   applications](#bootable-applications).
+- Additional artwork and testing of the loader by [Gavin
+  Knight](https://github.com/DynaMight1124).
 - This project was developed with the assistance of AI
   (Anthropic Claude / Claude Code).
 
